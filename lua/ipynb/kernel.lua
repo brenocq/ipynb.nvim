@@ -434,10 +434,15 @@ function M.start_bridge(state, python_path)
 
   local cmd = { python, bridge_path }
 
+  -- Unbuffered stdout arrives in chunks: data[1] continues the previous
+  -- partial line, the last element starts the next one.
+  local stdout_pending = ""
   local job_id = vim.fn.jobstart(cmd, {
     on_stdout = function(_, data, _)
+      data[1] = stdout_pending .. (data[1] or "")
+      stdout_pending = table.remove(data) or ""
       for _, line in ipairs(data) do
-        if line and line ~= "" then
+        if line ~= "" then
           local ok, msg = pcall(vim.json.decode, line)
           if ok and msg then
             handle_message(state, msg)
