@@ -191,6 +191,21 @@ function M.get_by_path(path)
   return nil
 end
 
+---Mark a notebook as having unsaved logical changes. The facade's 'modified'
+---flag is what stops nvim from silently autoread-reloading over unsaved work
+---when the file changes on disk (it prompts Load/Ignore instead).
+---@param state NotebookState
+function M.mark_dirty(state)
+  -- Both places on purpose: the buffer flag drives nvim's reload prompt, but
+  -- :edit! clears it BEFORE BufReadCmd fires, so the reload path must consult
+  -- the state flag.
+  state.dirty = true
+  local buf = state.facade_buf
+  if buf and vim.api.nvim_buf_is_valid(buf) then
+    vim.bo[buf].modified = true
+  end
+end
+
 ---Remove notebook state
 ---@param buf number Facade buffer number
 function M.remove(buf)

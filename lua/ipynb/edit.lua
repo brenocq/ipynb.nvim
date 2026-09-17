@@ -1102,6 +1102,9 @@ function M.close(state)
     cell.source = table.concat(lines, '\n')
     -- Clear modified flag - content is synced to facade
     vim.bo[edit.buf].modified = false
+    -- ...but the NOTEBOOK now differs from disk: surface that on the facade so
+    -- nvim prompts instead of silently reloading over the unsaved edit.
+    require('ipynb.state').mark_dirty(state)
   end
 
   -- Close window (buffer persists due to bufhidden='hide')

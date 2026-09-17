@@ -294,6 +294,19 @@ function M.open_notebook(buf, path)
   -- in-memory outputs and execution counts.
   local existing = state_mod.notebooks[buf]
   if existing and vim.fn.filereadable(path) == 1 then
+    -- If the in-memory notebook has unsaved changes, stash it before the disk
+    -- version replaces it — reloads must never be able to destroy work. The
+    -- state flag, not the buffer flag: :edit! clears 'modified' before
+    -- BufReadCmd fires.
+    if existing.dirty then
+      -- Timestamped so consecutive dirty reloads never clobber an earlier
+      -- backup; cleanup is manual and deliberate.
+      local backup = path .. '.reload-backup-' .. os.date('%Y%m%d-%H%M%S') .. '.ipynb'
+      local ok = pcall(M.write_ipynb, backup, existing.cells, existing.metadata)
+      vim.notify(ok and ('Unsaved notebook state backed up to ' .. backup)
+                 or 'WARNING: failed to back up unsaved notebook state',
+                 ok and vim.log.levels.WARN or vim.log.levels.ERROR)
+    end
     local cells, metadata, cell_ids = M.read_ipynb(path)
     local old_by_id = {}
     for _, cell in ipairs(existing.cells or {}) do
@@ -311,6 +324,7 @@ function M.open_notebook(buf, path)
     existing.cells = cells
     existing.metadata = metadata
     existing.cell_ids = cell_ids
+    existing.dirty = false
     local kernel_ok, kernel_mod = pcall(require, 'ipynb.kernel')
     if kernel_ok and kernel_mod.rebuild_cell_index_map then
       kernel_mod.rebuild_cell_index_map(existing)
@@ -390,6 +404,7 @@ function M.save_notebook(buf, path)
 
   -- Mark buffer as saved
   vim.bo[buf].modified = false
+  state.dirty = false
 
   vim.notify('Saved notebook: ' .. path, vim.log.levels.INFO)
 end
