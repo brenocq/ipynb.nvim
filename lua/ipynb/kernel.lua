@@ -91,6 +91,22 @@ local function update_cell_field(state, cell_idx, field, value)
   end)
 end
 
+---Clear every cell's queued/busy indicator and re-render. The per-cell
+---execution_state is normally reset by kernel status messages; on interrupt,
+---restart or shutdown those messages never come for still-queued cells, so
+---the icons would stay forever.
+---@param state NotebookState
+local function reset_cell_execution_states(state)
+  for _, cell in ipairs(state.cells or {}) do
+    if cell.execution_state and cell.execution_state ~= "idle" then
+      cell.execution_state = "idle"
+    end
+  end
+  vim.schedule(function()
+    require("ipynb.visuals").render_all(state)
+  end)
+end
+
 ---Rebuild the cell_id -> index cache for fast kernel message routing.
 ---@param state NotebookState
 local function rebuild_cell_index_map(state)
@@ -290,6 +306,7 @@ local function handle_message(state, msg)
   elseif msg_type == "interrupted" then
     kernel.execution_state = "idle"
     kernel.pending_cells = {}
+    reset_cell_execution_states(state)
     close_input_prompt(state)
     vim.schedule(function()
       vim.notify("Kernel interrupted", vim.log.levels.INFO)
@@ -298,6 +315,7 @@ local function handle_message(state, msg)
   elseif msg_type == "restarted" then
     kernel.execution_state = "idle"
     kernel.pending_cells = {}
+    reset_cell_execution_states(state)
     close_input_prompt(state)
     vim.schedule(function()
       vim.notify("Kernel restarted", vim.log.levels.INFO)
@@ -307,6 +325,7 @@ local function handle_message(state, msg)
     kernel.connected = false
     kernel.execution_state = "idle"
     kernel.pending_cells = {}
+    reset_cell_execution_states(state)
     close_input_prompt(state)
 
   elseif msg_type == "error" then
@@ -694,7 +713,10 @@ function M.shutdown(state)
   end
   if state.kernel then
     state.kernel.connected = false
+    state.kernel.execution_state = "idle"
+    state.kernel.pending_cells = {}
   end
+  reset_cell_execution_states(state)
 end
 
 ---Check if kernel is connected for a notebook
