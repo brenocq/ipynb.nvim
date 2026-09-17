@@ -320,6 +320,11 @@ function M.open_notebook(buf, path)
         cell.outputs = old.outputs
         cell.execution_count = old.execution_count
       end
+      -- Execution indicators reflect the KERNEL's reality, which the reload
+      -- does not touch: a running/queued cell is still running/queued.
+      if old then
+        cell.execution_state = old.execution_state
+      end
     end
     existing.cells = cells
     existing.metadata = metadata
