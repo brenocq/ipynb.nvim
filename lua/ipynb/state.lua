@@ -196,6 +196,13 @@ end
 function M.remove(buf)
   local state = M.notebooks[buf]
   if state then
+    -- Shut the kernel bridge down with the notebook: without this every closed
+    -- notebook leaks an orphaned ipykernel process.
+    local kernel_ok, kernel_mod = pcall(require, 'ipynb.kernel')
+    if kernel_ok then
+      pcall(kernel_mod.shutdown, state)
+    end
+
     -- Cleanup any active kernel stdin prompt before the notebook state disappears.
     local input_ok, input_mod = pcall(require, 'ipynb.input')
     if input_ok then

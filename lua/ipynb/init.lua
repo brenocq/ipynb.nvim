@@ -123,6 +123,21 @@ function M.setup(opts)
     end,
   })
 
+  -- Buffers are unloaded but not deleted on exit, so BufDelete cleanup never
+  -- fires — shut down every kernel THIS nvim spawned (state registry = our own
+  -- jobstart bridges, so kernels from other sources are never touched). Busy
+  -- kernels die too: quitting nvim means quitting the work.
+  vim.api.nvim_create_autocmd('VimLeavePre', {
+    group = vim.api.nvim_create_augroup('NotebookKernelSweep', { clear = true }),
+    callback = function()
+      local state_mod = require('ipynb.state')
+      local kernel = require('ipynb.kernel')
+      for _, state in pairs(state_mod.notebooks or {}) do
+        pcall(kernel.shutdown, state)
+      end
+    end,
+  })
+
   -- Setup user commands
   require('ipynb.commands').setup()
 end

@@ -681,8 +681,15 @@ end
 function M.shutdown(state)
   close_input_prompt(state)
   if state.kernel and state.kernel.job_id then
-    send_command(state, { action = "shutdown" })
-    vim.fn.jobstop(state.kernel.job_id)
+    local job = state.kernel.job_id
+    -- Closing stdin is the reliable kill: the bridge's stdin loop ends on EOF
+    -- and its `finally` calls shutdown_kernel(now=True). A signal would only
+    -- kill the bridge — jupyter_client starts kernels in their own session, so
+    -- SIGTERM to the bridge orphans the ipykernel grandchild.
+    pcall(vim.fn.chanclose, job, "stdin")
+    if vim.fn.jobwait({ job }, 1500)[1] == -1 then
+      vim.fn.jobstop(job)  -- bridge wedged: kill it; the kernel may leak here
+    end
     state.kernel.job_id = nil
   end
   if state.kernel then
