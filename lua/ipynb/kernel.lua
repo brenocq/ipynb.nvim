@@ -105,6 +105,7 @@ local function rebuild_cell_index_map(state)
   end
   state.kernel.cell_index_by_id = map
 end
+M.rebuild_cell_index_map = rebuild_cell_index_map
 
 ---Resolve a kernel message target to the current cell index by stable cell_id.
 ---@param state NotebookState

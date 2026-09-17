@@ -96,8 +96,10 @@ function M.create(state, buf)
     end,
   })
 
-  -- Setup cleanup autocmd
-  vim.api.nvim_create_autocmd('BufUnload', {
+  -- Cleanup on real deletion only: BufUnload also fires on :edit! reloads
+  -- (external file changes), where the state must survive so the reload path
+  -- in io.open_notebook can reuse it and keep the kernel attached.
+  vim.api.nvim_create_autocmd({ 'BufDelete', 'BufWipeout' }, {
     buffer = buf,
     callback = function()
       require('ipynb.state').remove(buf)

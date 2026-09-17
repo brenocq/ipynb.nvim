@@ -287,6 +287,39 @@ end
 ---@param buf number Buffer to populate
 ---@param path string Path to .ipynb file
 function M.open_notebook(buf, path)
+  -- External reload (an agent/git edited the file; :e!): BufReadCmd re-fires on
+  -- the same facade buffer. Reuse the existing state so the running kernel and
+  -- its stream callbacks (which capture the state object) stay attached; only
+  -- the document refreshes. Cells whose id AND source are unchanged keep their
+  -- in-memory outputs and execution counts.
+  local existing = state_mod.notebooks[buf]
+  if existing and vim.fn.filereadable(path) == 1 then
+    local cells, metadata, cell_ids = M.read_ipynb(path)
+    local old_by_id = {}
+    for _, cell in ipairs(existing.cells or {}) do
+      if cell.id then
+        old_by_id[cell.id] = cell
+      end
+    end
+    for _, cell in ipairs(cells) do
+      local old = cell.id and old_by_id[cell.id]
+      if old and old.source == cell.source then
+        cell.outputs = old.outputs
+        cell.execution_count = old.execution_count
+      end
+    end
+    existing.cells = cells
+    existing.metadata = metadata
+    existing.cell_ids = cell_ids
+    local kernel_ok, kernel_mod = pcall(require, 'ipynb.kernel')
+    if kernel_ok and kernel_mod.rebuild_cell_index_map then
+      kernel_mod.rebuild_cell_index_map(existing)
+    end
+    require('ipynb.facade').refresh(existing)
+    vim.notify('Notebook reloaded from disk (kernel preserved)', vim.log.levels.INFO)
+    return
+  end
+
   local cells, metadata, cell_ids
 
   -- Check if file exists
