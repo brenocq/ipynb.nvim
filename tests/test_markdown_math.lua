@@ -151,27 +151,31 @@ h.run_test('display_math_replaces_its_source_lines', function()
   end)
 end)
 
-h.run_test('adjacent_blocks_hang_from_the_line_above_both', function()
+h.run_test('adjacent_blocks_hang_in_order_from_the_line_above_both', function()
   if not have_tools then
     return
   end
-  local rows = IMAGE_ROWS
-  IMAGE_ROWS = 1
-  local ok, err = xpcall(function()
-    with_fake_image_layer(function()
-      -- The first block sits on the first content line: it hangs from the marker.
-      local state = open_markdown({ '$$a$$\n$$b$$' })
-      h.assert_true(wait_drawn(state, 'hidden to 2'), 'The math should render')
-      h.assert_eq(drawn(state), '0: below: │ [image row 1]\n0: below: │ [image row 1]\n1: hidden to 1\n2: hidden to 2')
+  with_fake_image_layer(function()
+    -- Tag each formula's image by the order it is first seen in.
+    local order = {}
+    images.get_file_virt_lines = function(_, _, path)
+      if not order[path] then
+        order[path] = vim.tbl_count(order) + 1
+      end
+      return { { { '[image ' .. order[path] .. ']', 'Normal' } } }, 1
+    end
+    -- The first block sits on the first content line: it hangs from the marker.
+    local state = open_markdown({ '$$a$$\n$$b$$' })
+    local expected = '0: below: │ [image 1] below: │ [image 2]\n1: hidden to 1\n2: hidden to 2'
+    h.assert_true(wait_drawn(state, 'hidden to 2'), 'The math should render')
+    h.assert_eq(drawn(state), expected)
 
-      -- Rendering again replaces the images rather than adding to them.
-      require('ipynb.markdown_math').render_all(state)
-      h.assert_true(wait_drawn(state, 'hidden to 2'), 'The math should render again')
-      h.assert_eq(drawn(state), '0: below: │ [image row 1]\n0: below: │ [image row 1]\n1: hidden to 1\n2: hidden to 2')
-    end)
-  end, debug.traceback)
-  IMAGE_ROWS = rows
-  assert(ok, err)
+    -- Redrawing the border, or rendering again, keeps the order and adds nothing.
+    markdown_math.set_border_hl(state, 1, 'IpynbBorderHover')
+    markdown_math.render_all(state)
+    h.assert_true(wait_drawn(state, 'hidden to 2'), 'The math should render again')
+    h.assert_eq(drawn(state), expected)
+  end)
 end)
 
 h.run_test('cursor_steps_over_hidden_blocks', function()
@@ -267,6 +271,34 @@ h.run_test('render_asked_for_mid_render_runs_after_it', function()
     images.get_file_virt_lines = file_lines
     assert(ok, err)
     h.assert_eq(drawn(state), '0: below: │ [image row 1] below: │ [image row 2] below: │ [image row 3]\n1: hidden to 1\n2: below: │ [image row 1] below: │ [image row 2] below: │ [image row 3]\n3: hidden to 3')
+  end)
+end)
+
+h.run_test('colorscheme_change_renders_math_in_the_new_color', function()
+  if not have_tools then
+    return
+  end
+  with_fake_image_layer(function()
+    local paths = {}
+    images.get_file_virt_lines = function(_, _, path)
+      table.insert(paths, path)
+      return { { { '[image]', 'Normal' } } }, 1
+    end
+    local normal = vim.api.nvim_get_hl(0, { name = 'Normal' })
+    local ok, err = xpcall(function()
+      local state = open_markdown({ '$$x$$' })
+      h.assert_true(wait_drawn(state, 'hidden to 1'), 'The math should render')
+      local before = paths[#paths]
+
+      -- A colorscheme clears the image highlights and changes the text color.
+      vim.api.nvim_set_hl(0, 'Normal', { fg = '#123456', bg = normal.bg })
+      vim.api.nvim_exec_autocmds('ColorScheme', {})
+      h.assert_true(vim.wait(20000, function()
+        return paths[#paths] ~= before
+      end, 10), 'The math should render again in the new color')
+    end, debug.traceback)
+    vim.api.nvim_set_hl(0, 'Normal', normal)
+    assert(ok, err)
   end)
 end)
 

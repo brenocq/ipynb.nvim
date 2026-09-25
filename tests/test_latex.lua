@@ -137,6 +137,21 @@ h.run_test('inline_math_is_exactly_one_row_tall', function()
   assert(ok, err)
 end)
 
+h.run_test('display_environments_render_inside_math_delimiters', function()
+  if not have_tools then
+    return
+  end
+  -- LaTeX rejects align inside math; MathJax, and so Jupyter, takes it.
+  local sources = {
+    '$$\\begin{align} a &= b \\\\ c &= d \\end{align}$$',
+    '$\\displaystyle \\begin{equation*} E = mc^2 \\end{equation*}$',
+    '$$\\begin{aligned} a &= b \\end{aligned}$$',
+  }
+  for source, result in pairs(render_all(sources)) do
+    h.assert_true(result.path ~= nil, ('Should render: %s (%s)'):format(source, tostring(result.err)))
+  end
+end)
+
 h.run_test('broken_formula_does_not_break_its_batch', function()
   if not have_tools then
     return
