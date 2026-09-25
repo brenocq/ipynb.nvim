@@ -1,9 +1,10 @@
 -- ipynb/markdown_math.lua - Render math in markdown cells
--- A $$ block on its own lines is replaced by its image in Notebook mode: each
--- source line is concealed and carries one row of the image, and rows beyond
--- the source lines hang below as virtual lines. Inline math ($...$, or $$...$$
--- inside a line) is replaced by a one-row image within its line. The source
--- stays in the buffer and shows again while the cell is open in the edit float.
+-- A $$ block on its own lines is replaced by its image in Notebook mode: its
+-- source lines are hidden and the image rows take their place as virtual
+-- lines, which the cursor steps over like a fold. Inline math ($...$, or
+-- $$...$$ inside a line) is replaced by a one-row image within its line. The
+-- source stays in the buffer and shows again while the cell is open in the
+-- edit float.
 
 local M = {}
 
@@ -11,6 +12,10 @@ local ns = vim.api.nvim_create_namespace('ipynb_markdown_math')
 M.ns = ns
 
 local query = nil ---@type vim.treesitter.Query|nil
+
+-- Hiding whole lines needs Neovim 0.11. Before that, a block's source lines
+-- are concealed and carry the image rows inline instead.
+local hide_lines = vim.fn.has('nvim-0.11') == 1
 
 ---@class MathBlock
 ---@field display boolean A $$ block on its own lines (else inline math)
@@ -28,6 +33,19 @@ local query = nil ---@type vim.treesitter.Query|nil
 ---@return boolean
 local function is_inline_math(text, after)
   return text:match('^%$[^%s$]') ~= nil and text:match('[^%s]%$$') ~= nil and not after:match('%d')
+end
+
+---Jupyter hands math to MathJax before markdown runs, so authors escape `*`
+---as `\*` to keep it from starting emphasis. LaTeX has no such escape (`x^\*`
+---fails), so drop the backslash; an escaped backslash (`\\*`) stays.
+---@param text string
+---@return string
+local function unescape_markdown(text)
+  return (text:gsub('(\\+)%*', function(backslashes)
+    if #backslashes % 2 == 1 then
+      return backslashes:sub(2) .. '*'
+    end
+  end))
 end
 
 ---Find the math of a markdown source: $$ blocks on their own lines, and
@@ -73,6 +91,9 @@ function M.find_math(source)
   table.sort(blocks, function(a, b)
     return a.first < b.first or (a.first == b.first and a.first_col < b.first_col)
   end)
+  for _, block in ipairs(blocks) do
+    block.text = unescape_markdown(block.text)
+  end
   return blocks
 end
 
@@ -161,15 +182,48 @@ function M.set_border_hl(state, cell_idx, border_hl)
   end
 end
 
+---Hang image rows below a line, drawn with the cell's border
+---@param buf number
+---@param cell Cell
+---@param row number
+---@param indent table Chunk indenting the image
+---@param image_rows table[] Placeholder rows, one virt_line entry each
+local function hang(buf, cell, row, indent, image_rows)
+  local entry = {
+    id = vim.api.nvim_buf_set_extmark(buf, ns, row, 0, {}),
+    indent = indent,
+    rows = image_rows,
+  }
+  hanging[cell] = hanging[cell] or {}
+  table.insert(hanging[cell], entry)
+  draw_hanging(buf, entry, border_hls[cell] or 'IpynbBorder')
+end
+
 ---Show an image in place of the source lines [first_row, last_row]
 ---@param buf number
 ---@param cell Cell
 ---@param first_row number
 ---@param last_row number
 ---@param image_rows table[] Placeholder rows, one virt_line entry each
-local function place(buf, cell, first_row, last_row, image_rows)
+---@param anchor_row number Nearest line above the block that stays visible
+local function place(buf, cell, first_row, last_row, image_rows, anchor_row)
   local lines = vim.api.nvim_buf_get_lines(buf, first_row, last_row + 1, false)
   local indent = { string.rep(' ', vim.fn.strdisplaywidth(lines[1]:match('^%s*'))) }
+
+  if hide_lines then
+    -- Concealed text still counts when a line wraps, so an image drawn on a
+    -- long source line would be split across screen rows. Hide the lines
+    -- instead, and hang every image row from the line above; virtual lines on
+    -- a hidden line would be hidden too.
+    vim.api.nvim_buf_set_extmark(buf, ns, first_row, 0, {
+      end_row = last_row,
+      end_col = #lines[#lines],
+      conceal_lines = '',
+    })
+    hang(buf, cell, anchor_row, indent, image_rows)
+    return
+  end
+
   -- A short image sits in the middle of a tall block.
   local offset = math.max(0, math.floor((#lines - #image_rows) / 2))
 
@@ -184,15 +238,57 @@ local function place(buf, cell, first_row, last_row, image_rows)
   end
 
   if #image_rows > #lines then
-    local entry = {
-      id = vim.api.nvim_buf_set_extmark(buf, ns, last_row, 0, {}),
-      indent = indent,
-      rows = vim.list_slice(image_rows, #lines + 1),
-    }
-    hanging[cell] = hanging[cell] or {}
-    table.insert(hanging[cell], entry)
-    draw_hanging(buf, entry, border_hls[cell] or 'IpynbBorder')
+    hang(buf, cell, last_row, indent, vim.list_slice(image_rows, #lines + 1))
   end
+end
+
+---The hidden $$ block covering a row, if any
+---@param buf number
+---@param row number
+---@return number|nil first, number|nil last
+local function hidden_block_at(buf, row)
+  local marks = vim.api.nvim_buf_get_extmarks(buf, ns, { row, 0 }, { row, -1 }, { details = true, overlap = true })
+  for _, mark in ipairs(marks) do
+    if mark[4].conceal_lines then
+      return mark[2], mark[4].end_row
+    end
+  end
+  return nil, nil
+end
+
+-- Buffers whose cursor already steps over hidden blocks
+local stepping = {} ---@type table<number, boolean>
+
+---Keep the cursor off hidden block lines, where it would be invisible: step
+---over a block in the direction the cursor was moving, like over a fold.
+---@param buf number
+local function step_over_hidden_blocks(buf)
+  if not hide_lines or stepping[buf] then
+    return
+  end
+  stepping[buf] = true
+  local last_row = nil
+  vim.api.nvim_create_autocmd('CursorMoved', {
+    group = vim.api.nvim_create_augroup('IpynbMarkdownMath' .. buf, { clear = true }),
+    buffer = buf,
+    callback = function()
+      local cursor = vim.api.nvim_win_get_cursor(0)
+      local row, target = cursor[1] - 1, cursor[1] - 1
+      local down = last_row == nil or row >= last_row
+      -- Blocks sit inside cells, so a visible marker line always bounds them.
+      for _ = 1, 100 do
+        local first, last = hidden_block_at(buf, target)
+        if not first then
+          break
+        end
+        target = down and last + 1 or first - 1
+      end
+      if target ~= row then
+        vim.api.nvim_win_set_cursor(0, { target + 1, 0 })
+      end
+      last_row = target
+    end,
+  })
 end
 
 ---Show a one-row image in place of inline math
@@ -215,9 +311,10 @@ end
 ---@param cell_idx number
 function M.clear_cell(state, cell_idx)
   local cell = state.cells[cell_idx]
-  local first, last = require('ipynb.cells').get_content_range(state, cell_idx)
-  if first and last and last >= first then
-    vim.api.nvim_buf_clear_namespace(state.facade_buf, ns, first, last + 1)
+  -- From the start marker: a block on the first content line hangs from it.
+  local first, last = require('ipynb.cells').get_cell_range(state, cell_idx)
+  if first and last then
+    vim.api.nvim_buf_clear_namespace(state.facade_buf, ns, first, last)
   end
   if cell then
     hanging[cell] = nil
@@ -227,14 +324,11 @@ function M.clear_cell(state, cell_idx)
   end
 end
 
----Render the math of one markdown cell
+---Render the math of one markdown cell (see M.render_cell)
 ---@param state NotebookState
 ---@param cell_idx number
-function M.render_cell(state, cell_idx)
+local function render_cell(state, cell_idx)
   local cell = state.cells[cell_idx]
-  if not cell or not cell.id or not vim.api.nvim_buf_is_valid(state.facade_buf) then
-    return
-  end
   M.clear_cell(state, cell_idx)
   -- The source shows while the cell is being edited.
   if cell.type ~= 'markdown' or (state.edit_state and state.edit_state.cell_id == cell.id) then
@@ -270,22 +364,73 @@ function M.render_cell(state, cell_idx)
   end
 
   local buf = state.facade_buf
+  step_over_hidden_blocks(buf)
+  local errors = {} ---@type table<number, string[]> Errors by row
+  local hidden = nil ---@type { last: number, anchor: number }|nil Last block hidden so far
   for _, block in ipairs(M.find_math(cell.source)) do
-    local first_row = content_start + block.first
+    local first_row, last_row = content_start + block.first, content_start + block.last
     local path, err = latex.lookup(block.text, rerender, { hl = 'IpynbMarkdownMath', inline = not block.display })
     if path then
       local image_rows = images.get_file_virt_lines(state, image_owner(cell), path)
       if image_rows and block.display then
-        place(buf, cell, first_row, content_start + block.last, image_rows)
+        -- A block right below another hidden one hangs from the same line.
+        local anchor = (hidden and hidden.last == first_row - 1) and hidden.anchor or first_row - 1
+        place(buf, cell, first_row, last_row, image_rows, anchor)
+        hidden = { last = last_row, anchor = anchor }
       elseif image_rows then
         place_inline(buf, first_row, block.first_col, block.last_col, image_rows[1])
       end
     elseif err then
-      vim.api.nvim_buf_set_extmark(buf, ns, first_row, 0, {
-        virt_text = { { 'LaTeX error: ' .. err, 'IpynbOutputError' } },
-        virt_text_pos = 'eol',
-      })
+      errors[first_row] = errors[first_row] or {}
+      table.insert(errors[first_row], err)
     end
+  end
+
+  -- One message per line: the first error, and how many others there are.
+  for row, messages in pairs(errors) do
+    local text = 'LaTeX error: ' .. messages[1]
+    if #messages > 1 then
+      text = ('%s (+%d more)'):format(text, #messages - 1)
+    end
+    vim.api.nvim_buf_set_extmark(buf, ns, row, 0, {
+      virt_text = { { text, 'IpynbOutputError' } },
+      virt_text_pos = 'eol',
+    })
+  end
+end
+
+-- Cells being rendered. Showing an image waits for it with vim.wait, which
+-- runs scheduled callbacks, so a cell can be asked to render again while it
+-- renders: note that, and render once more afterwards instead of interleaving.
+local rendering = setmetatable({}, { __mode = 'k' }) ---@type table<Cell, 'busy'|'again'>
+
+---Render the math of one markdown cell
+---@param state NotebookState
+---@param cell_idx number
+function M.render_cell(state, cell_idx)
+  local cell = state.cells[cell_idx]
+  if not cell or not cell.id or not vim.api.nvim_buf_is_valid(state.facade_buf) then
+    return
+  end
+  if rendering[cell] then
+    rendering[cell] = 'again'
+    return
+  end
+  rendering[cell] = 'busy'
+  local ok, err = pcall(render_cell, state, cell_idx)
+  local again = rendering[cell] == 'again'
+  rendering[cell] = nil
+  if again then
+    vim.schedule(function()
+      for idx, other in ipairs(state.cells) do
+        if other == cell then
+          return M.render_cell(state, idx)
+        end
+      end
+    end)
+  end
+  if not ok then
+    error(err, 0)
   end
 end
 

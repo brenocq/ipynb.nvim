@@ -297,6 +297,14 @@ local function latex_virt_lines(state, cell, output, on_ready)
   return nil
 end
 
+-- Cells whose outputs are being rendered. Showing an image waits for it with
+-- vim.wait, which runs scheduled callbacks, so a cell can be asked to render
+-- again while it renders: note that, and render once more afterwards instead
+-- of interleaving the two.
+local rendering = setmetatable({}, { __mode = 'k' }) ---@type table<Cell, 'busy'|'again'>
+
+local render_outputs
+
 ---Render outputs for a cell as virtual lines with true text/image interleaving
 ---All outputs (text and images) are combined into a single extmark's virt_lines
 ---This guarantees correct ordering: text1 → img1 → text2 → img2 → etc.
@@ -304,6 +312,36 @@ end
 ---@param cell_idx number
 ---@param skip_image_render boolean|nil Unused, kept for API compatibility
 function M.render_outputs(state, cell_idx, skip_image_render)
+  local cell = state.cells[cell_idx]
+  if not cell then
+    return
+  end
+  if rendering[cell] then
+    rendering[cell] = 'again'
+    return
+  end
+  rendering[cell] = 'busy'
+  local ok, err = pcall(render_outputs, state, cell_idx)
+  local again = rendering[cell] == 'again'
+  rendering[cell] = nil
+  if again then
+    vim.schedule(function()
+      for idx, other in ipairs(state.cells) do
+        if other == cell then
+          return M.render_outputs(state, idx)
+        end
+      end
+    end)
+  end
+  if not ok then
+    error(err, 0)
+  end
+end
+
+---Render one cell's outputs (see M.render_outputs)
+---@param state NotebookState
+---@param cell_idx number
+render_outputs = function(state, cell_idx)
   local cell = state.cells[cell_idx]
   if not cell.outputs or #cell.outputs == 0 then
     return
