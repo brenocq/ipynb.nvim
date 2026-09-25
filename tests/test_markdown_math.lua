@@ -53,6 +53,16 @@ h.run_test('finds_display_blocks_and_inline_math', function()
   }, '\n'))
 end)
 
+h.run_test('markdown_escapes_in_math_are_undone', function()
+  -- Authors write \\* to keep * from starting emphasis; LaTeX has no such
+  -- escape. An escaped backslash before * stays as it is.
+  local blocks = markdown_math.find_math('Estimate $x^\\*$ and $y^{\\*}$.\n\n$$a \\\\* b = x^\\*$$')
+  local texts = vim.tbl_map(function(block)
+    return block.text
+  end, blocks)
+  h.assert_eq(table.concat(texts, ' | '), '$x^*$ | $y^{*}$ | $$a \\\\* b = x^*$$')
+end)
+
 -- The terminal image layer needs a graphics terminal: stand in with marker
 -- rows, IMAGE_ROWS tall, so the tests see where each image row lands.
 local IMAGE_ROWS = 3
@@ -94,7 +104,9 @@ local function drawn(state)
   local rows = {}
   for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(state.facade_buf, markdown_math.ns, 0, -1, { details = true })) do
     local row, details, parts = mark[3] > 0 and (mark[2] .. ':' .. mark[3]) or mark[2], mark[4], {}
-    if details.conceal then
+    if details.conceal_lines then
+      table.insert(parts, 'hidden to ' .. details.end_row)
+    elseif details.conceal then
       table.insert(parts, 'conceal')
     end
     for _, chunk in ipairs(details.virt_text or {}) do
@@ -128,18 +140,18 @@ h.run_test('display_math_replaces_its_source_lines', function()
   with_fake_image_layer(function()
     -- Buffer rows: marker 0, 'One line:' 1, '' 2, block 3, '' 4, 'Three:' 5, block 6-8
     local state = open_markdown({ 'One line:\n\n$$x^2$$\n\nThree:\n$$\n\\frac{a}{b}\n$$' })
-    h.assert_true(wait_drawn(state, 'image row'), 'The math should render')
+    h.assert_true(wait_drawn(state, 'hidden to 8'), 'The math should render')
+    local rows = 'below: │ [image row 1] below: │ [image row 2] below: │ [image row 3]'
     h.assert_eq(drawn(state), table.concat({
-      '3: below: │ [image row 2] below: │ [image row 3]',
-      '3: conceal [image row 1]',
-      '6: conceal [image row 1]',
-      '7: conceal [image row 2]',
-      '8: conceal [image row 3]',
+      '2: ' .. rows,
+      '3: hidden to 3',
+      '5: ' .. rows,
+      '6: hidden to 8',
     }, '\n'))
   end)
 end)
 
-h.run_test('short_image_sits_in_the_middle_of_a_tall_block', function()
+h.run_test('adjacent_blocks_hang_from_the_line_above_both', function()
   if not have_tools then
     return
   end
@@ -147,13 +159,41 @@ h.run_test('short_image_sits_in_the_middle_of_a_tall_block', function()
   IMAGE_ROWS = 1
   local ok, err = xpcall(function()
     with_fake_image_layer(function()
-      local state = open_markdown({ '$$\na + b\n$$' })
-      h.assert_true(wait_drawn(state, 'image row'), 'The math should render')
-      h.assert_eq(drawn(state), '1: conceal\n2: conceal [image row 1]\n3: conceal')
+      -- The first block sits on the first content line: it hangs from the marker.
+      local state = open_markdown({ '$$a$$\n$$b$$' })
+      h.assert_true(wait_drawn(state, 'hidden to 2'), 'The math should render')
+      h.assert_eq(drawn(state), '0: below: │ [image row 1]\n0: below: │ [image row 1]\n1: hidden to 1\n2: hidden to 2')
+
+      -- Rendering again replaces the images rather than adding to them.
+      require('ipynb.markdown_math').render_all(state)
+      h.assert_true(wait_drawn(state, 'hidden to 2'), 'The math should render again')
+      h.assert_eq(drawn(state), '0: below: │ [image row 1]\n0: below: │ [image row 1]\n1: hidden to 1\n2: hidden to 2')
     end)
   end, debug.traceback)
   IMAGE_ROWS = rows
   assert(ok, err)
+end)
+
+h.run_test('cursor_steps_over_hidden_blocks', function()
+  if not have_tools then
+    return
+  end
+  with_fake_image_layer(function()
+    -- Buffer rows: marker 0, 'Before' 1, block 2-4, 'After' 5
+    local state = open_markdown({ 'Before\n$$\nx\n$$\nAfter' })
+    h.assert_true(wait_drawn(state, 'hidden to 4'), 'The math should render')
+    -- Headless nvim does not fire CursorMoved for fed keys: fire it by hand.
+    local function move(keys)
+      h.feedkeys(keys)
+      vim.api.nvim_exec_autocmds('CursorMoved', { buffer = state.facade_buf })
+    end
+    vim.api.nvim_win_set_cursor(0, { 2, 0 })
+    vim.api.nvim_exec_autocmds('CursorMoved', { buffer = state.facade_buf })
+    move('j')
+    h.assert_eq(vim.api.nvim_win_get_cursor(0)[1], 6, 'j should step over the block')
+    move('k')
+    h.assert_eq(vim.api.nvim_win_get_cursor(0)[1], 2, 'k should step back over it')
+  end)
 end)
 
 h.run_test('editing_a_cell_shows_its_source_until_it_closes', function()
@@ -163,14 +203,14 @@ h.run_test('editing_a_cell_shows_its_source_until_it_closes', function()
   with_fake_image_layer(function()
     -- Buffer rows: first cell's math on row 2, second cell's on row 7
     local state = open_markdown({ 'Text\n$$x$$', 'Other\n$$y$$' })
-    h.assert_true(wait_drawn(state, '7: conceal'), 'Both cells should render')
+    h.assert_true(wait_drawn(state, '7: hidden'), 'Both cells should render')
 
     h.enter_cell(1)
-    h.assert_eq(drawn(state):find('2: ', 1, true), nil, 'The edited cell should show its source')
-    h.assert_true(drawn(state):find('7: conceal', 1, true) ~= nil, 'Other cells stay rendered')
+    h.assert_eq(drawn(state):find('[12]: '), nil, 'The edited cell should show its source')
+    h.assert_true(drawn(state):find('7: hidden', 1, true) ~= nil, 'Other cells stay rendered')
 
     h.exit_cell()
-    h.assert_true(wait_drawn(state, '2: conceal'), 'Closing the float should render the cell again')
+    h.assert_true(wait_drawn(state, '2: hidden'), 'Closing the float should render the cell again')
   end)
 end)
 
@@ -180,12 +220,12 @@ h.run_test('cell_operations_keep_math_in_place', function()
   end
   with_fake_image_layer(function()
     local state = open_markdown({ '$$x$$' })
-    h.assert_true(wait_drawn(state, '1: conceal'), 'The math should render')
+    h.assert_true(wait_drawn(state, '1: hidden'), 'The math should render')
 
     require('ipynb.facade').insert_cell(state, 0, 'markdown')
     -- The new empty cell takes rows 0-2 and a blank line; the math moves to row 5.
-    h.assert_true(wait_drawn(state, '5: conceal'), 'The math should follow its cell')
-    h.assert_eq(drawn(state):find('1: ', 1, true), nil, 'Nothing should be left at the old row')
+    h.assert_true(wait_drawn(state, '5: hidden'), 'The math should follow its cell')
+    h.assert_eq(drawn(state):find('^[01]: '), nil, 'Nothing should be left at the old rows')
   end)
 end)
 
@@ -201,14 +241,46 @@ h.run_test('inline_math_replaces_its_source_within_the_line', function()
   end)
 end)
 
+h.run_test('render_asked_for_mid_render_runs_after_it', function()
+  if not have_tools then
+    return
+  end
+  with_fake_image_layer(function()
+    local state = open_markdown({ '$$a$$\n\n$$b$$' })
+    h.assert_true(wait_drawn(state, 'hidden to 3'), 'The math should render')
+
+    -- Showing an image runs scheduled callbacks (vim.wait): one may render the
+    -- same cell again before the first render has placed every image.
+    local file_lines = images.get_file_virt_lines
+    local nested = false
+    images.get_file_virt_lines = function(...)
+      if not nested then
+        nested = true
+        markdown_math.render_cell(state, 1)
+      end
+      return file_lines(...)
+    end
+    local ok, err = xpcall(function()
+      markdown_math.render_cell(state, 1)
+      vim.wait(100)
+    end, debug.traceback)
+    images.get_file_virt_lines = file_lines
+    assert(ok, err)
+    h.assert_eq(drawn(state), '0: below: │ [image row 1] below: │ [image row 2] below: │ [image row 3]\n1: hidden to 1\n2: below: │ [image row 1] below: │ [image row 2] below: │ [image row 3]\n3: hidden to 3')
+  end)
+end)
+
 h.run_test('broken_math_keeps_its_source_and_shows_the_error', function()
   if not have_tools then
     return
   end
   with_fake_image_layer(function()
-    local state = open_markdown({ 'Broken:\n$$\\frac{1}{$$' })
-    h.assert_true(wait_drawn(state, 'LaTeX error'), 'The error should be shown')
-    h.assert_eq(drawn(state), '2: LaTeX error: File ended while scanning use of \\frac')
+    local state = open_markdown({ 'Broken:\n$$\\frac{1}{$$\nTwo $\\undefined$ and $\\alsoundefined$, one $\\nope$.' })
+    h.assert_true(wait_drawn(state, 'LaTeX error.*\n.*LaTeX error'), 'The errors should be shown')
+    h.assert_eq(drawn(state), table.concat({
+      '2: LaTeX error: File ended while scanning use of \\frac',
+      '3: LaTeX error: Undefined control sequence (+2 more)',
+    }, '\n'))
   end)
 end)
 
