@@ -1,8 +1,9 @@
--- ipynb/markdown_math.lua - Render display math ($$...$$) in markdown cells
+-- ipynb/markdown_math.lua - Render math in markdown cells
 -- A $$ block on its own lines is replaced by its image in Notebook mode: each
 -- source line is concealed and carries one row of the image, and rows beyond
--- the source lines hang below as virtual lines. The source stays in the buffer
--- and shows again while the cell is open in the edit float.
+-- the source lines hang below as virtual lines. Inline math ($...$, or $$...$$
+-- inside a line) is replaced by a one-row image within its line. The source
+-- stays in the buffer and shows again while the cell is open in the edit float.
 
 local M = {}
 
@@ -11,10 +12,29 @@ M.ns = ns
 
 local query = nil ---@type vim.treesitter.Query|nil
 
----Find the $$ blocks that occupy whole lines of a markdown source
+---@class MathBlock
+---@field display boolean A $$ block on its own lines (else inline math)
+---@field first number First source line (0-based)
+---@field last number Last source line (0-based)
+---@field first_col number Byte column where the math starts on its first line
+---@field last_col number Byte column where the math ends on its last line (exclusive)
+---@field text string LaTeX to render, with its dollar delimiters
+
+---Whether $...$ counts as math, by the rules of Jupyter's markdown (pandoc's
+---tex_math_dollars): no space just inside the dollars, and no digit right
+---after the closing one, so prices like "$5 and $10" stay text.
+---@param text string
+---@param after string Character following the closing dollar
+---@return boolean
+local function is_inline_math(text, after)
+  return text:match('^%$[^%s$]') ~= nil and text:match('[^%s]%$$') ~= nil and not after:match('%d')
+end
+
+---Find the math of a markdown source: $$ blocks on their own lines, and
+---single-line inline math. Math in code spans and fences is not math.
 ---@param source string
----@return { first: number, last: number, text: string }[] blocks First and last source line (0-based)
-function M.find_display_math(source)
+---@return MathBlock[] blocks In source order
+function M.find_math(source)
   local ok, parser = pcall(vim.treesitter.get_string_parser, source, 'markdown')
   if not ok then
     return {}
@@ -31,15 +51,27 @@ function M.find_display_math(source)
     for _, node in query:iter_captures(tree:root(), source) do
       local first, first_col, last, last_col = node:range()
       local text = vim.treesitter.get_node_text(node, source)
+      local block = { first = first, last = last, first_col = first_col, last_col = last_col, text = text }
+      local double = #text > 4 and text:match('^%$%$') and text:match('%$%$$')
       local own_lines = lines[first + 1]:sub(1, first_col):match('^%s*$')
         and lines[last + 1]:sub(last_col + 1):match('^%s*$')
-      if own_lines and #text > 4 and text:match('^%$%$') and text:match('%$%$$') then
-        table.insert(blocks, { first = first, last = last, text = text })
+      if double and own_lines then
+        block.display = true
+        table.insert(blocks, block)
+      elseif first == last then
+        block.display = false
+        if double then
+          -- Inline in a line of text: typeset it inline too
+          block.text = '$' .. text:sub(3, -3) .. '$'
+          table.insert(blocks, block)
+        elseif is_inline_math(text, lines[last + 1]:sub(last_col + 1, last_col + 1)) then
+          table.insert(blocks, block)
+        end
       end
     end
   end)
   table.sort(blocks, function(a, b)
-    return a.first < b.first
+    return a.first < b.first or (a.first == b.first and a.first_col < b.first_col)
   end)
   return blocks
 end
@@ -163,6 +195,21 @@ local function place(buf, cell, first_row, last_row, image_rows)
   end
 end
 
+---Show a one-row image in place of inline math
+---@param buf number
+---@param row number
+---@param col number
+---@param end_col number
+---@param image_row table Placeholder row, as a virt_line entry
+local function place_inline(buf, row, col, end_col, image_row)
+  vim.api.nvim_buf_set_extmark(buf, ns, row, col, {
+    end_col = end_col,
+    conceal = '',
+    virt_text = { image_row[1] },
+    virt_text_pos = 'inline',
+  })
+end
+
 ---Remove a cell's rendered math, showing its source again
 ---@param state NotebookState
 ---@param cell_idx number
@@ -180,7 +227,7 @@ function M.clear_cell(state, cell_idx)
   end
 end
 
----Render the display math of one markdown cell
+---Render the math of one markdown cell
 ---@param state NotebookState
 ---@param cell_idx number
 function M.render_cell(state, cell_idx)
@@ -223,13 +270,15 @@ function M.render_cell(state, cell_idx)
   end
 
   local buf = state.facade_buf
-  for _, block in ipairs(M.find_display_math(cell.source)) do
-    local first_row, last_row = content_start + block.first, content_start + block.last
-    local path, err = latex.lookup(block.text, rerender, 'IpynbMarkdownMath')
+  for _, block in ipairs(M.find_math(cell.source)) do
+    local first_row = content_start + block.first
+    local path, err = latex.lookup(block.text, rerender, { hl = 'IpynbMarkdownMath', inline = not block.display })
     if path then
       local image_rows = images.get_file_virt_lines(state, image_owner(cell), path)
-      if image_rows then
-        place(buf, cell, first_row, last_row, image_rows)
+      if image_rows and block.display then
+        place(buf, cell, first_row, content_start + block.last, image_rows)
+      elseif image_rows then
+        place_inline(buf, first_row, block.first_col, block.last_col, image_rows[1])
       end
     elseif err then
       vim.api.nvim_buf_set_extmark(buf, ns, first_row, 0, {
@@ -240,7 +289,7 @@ function M.render_cell(state, cell_idx)
   end
 end
 
----Render the display math of every markdown cell
+---Render the math of every markdown cell
 ---@param state NotebookState
 function M.render_all(state)
   if not vim.api.nvim_buf_is_valid(state.facade_buf) then

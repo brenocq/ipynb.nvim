@@ -3,7 +3,8 @@
 -- document, one page each, so a notebook full of formulas costs one latex run.
 -- dvisvgm turns the pages into SVGs, and rsvg-convert rasterizes each one onto
 -- a canvas that is a whole number of terminal cells: kitty fits images to their
--- cells, and any rescaling there would blur the math.
+-- cells, and any rescaling there would blur the math. Inline math is rendered
+-- exactly one row tall, its baseline where the text's is.
 
 local M = {}
 
@@ -22,6 +23,19 @@ local PREAMBLE = [[
 \pagestyle{empty}
 \setlength{\parindent}{0pt}
 \begin{document}]]
+
+-- Inline math sits on a strut, 0.7 and 0.3 of a 12pt line above and below the
+-- baseline, and the preview package makes each page exactly that box: one
+-- terminal row, with the baseline about where the terminal font puts it.
+local INLINE_PREAMBLE = [[
+\documentclass{article}
+\usepackage{amsmath,amssymb,mathtools,xcolor}
+\usepackage[active,tightpage]{preview}
+\setlength\PreviewBorder{0pt}
+\begin{document}]]
+
+-- rsvg-convert processes running at once for one batch
+local MAX_RASTERIZERS = 8
 
 local tools_found = nil ---@type boolean|nil
 local failed = {} ---@type table<string, string> Why sources failed to render, by key
@@ -140,7 +154,7 @@ local function finish(item, err)
 end
 
 ---Rasterize one page onto a canvas of whole cells, the math centered
----vertically, into the item's cache file
+---vertically, into the item's cache file. Inline math is one row tall.
 ---@param item table
 ---@param svg string Path to the page's SVG
 ---@param on_done fun(err: string|nil)
@@ -153,15 +167,25 @@ local function rasterize(item, svg, on_done)
   end
 
   -- rsvg-convert reads SVG pt as 1/72 inch
-  local width, height = width_pt * item.dpi / 72, height_pt * item.dpi / 72
+  local resolution = item.dpi
+  local height = height_pt * resolution / 72
+  if item.inline and height > item.cell_height + 0.5 then
+    -- Taller than its strut: shrink it to one row here rather than let kitty.
+    resolution = resolution * item.cell_height / height
+    height = item.cell_height
+  end
+  local width = width_pt * resolution / 72
   local canvas_width = math.max(1, math.ceil(width / item.cell_width - 1e-6)) * item.cell_width
-  local canvas_height = math.max(1, math.ceil(height / item.cell_height - 1e-6)) * item.cell_height
-  local dpi = ('%.3f'):format(item.dpi)
+  local canvas_height = item.inline and item.cell_height
+    or math.max(1, math.ceil(height / item.cell_height - 1e-6)) * item.cell_height
+  local dpi = ('%.3f'):format(resolution)
   local png = svg:gsub('%.svg$', '.png')
+  -- Values joined with '=': a rounding-negative offset like -0.06px would
+  -- otherwise be read as an option.
   run({
-    'rsvg-convert', '--dpi-x', dpi, '--dpi-y', dpi,
-    '--page-width', canvas_width .. 'px', '--page-height', canvas_height .. 'px',
-    '--top', ('%.3fpx'):format((canvas_height - height) / 2),
+    'rsvg-convert', '--dpi-x=' .. dpi, '--dpi-y=' .. dpi,
+    ('--page-width=%dpx'):format(canvas_width), ('--page-height=%dpx'):format(canvas_height),
+    ('--top=%.3fpx'):format((canvas_height - height) / 2),
     '-o', png, svg,
   }, vim.fs.dirname(svg), function(ok)
     -- Only complete images reach the cache, where they are trusted as is.
@@ -179,9 +203,18 @@ local function render(items, on_done)
   local dir = cache_dir() .. '/build-' .. vim.uv.hrtime()
   vim.fn.mkdir(dir, 'p')
 
-  local doc = { PREAMBLE, ('\\color[HTML]{%s}'):format(items[1].fg) }
-  for _, item in ipairs(items) do
-    vim.list_extend(doc, { item.source, '\\clearpage' })
+  local color = ('\\color[HTML]{%s}'):format(items[1].fg)
+  local doc
+  if items[1].inline then
+    doc = { INLINE_PREAMBLE }
+    for _, item in ipairs(items) do
+      table.insert(doc, ('\\begin{preview}%s\\strut %s\\end{preview}'):format(color, item.source))
+    end
+  else
+    doc = { PREAMBLE, color }
+    for _, item in ipairs(items) do
+      vim.list_extend(doc, { item.source, '\\clearpage' })
+    end
   end
   table.insert(doc, '\\end{document}')
   vim.fn.writefile(vim.split(table.concat(doc, '\n'), '\n'), dir .. '/doc.tex')
@@ -204,7 +237,9 @@ local function render(items, on_done)
     if not ok then
       return fail(latex_error(dir))
     end
-    run({ 'dvisvgm', '--verbosity=1', '--no-fonts', '--exact-bbox', '-p1-', '-o', 'page-%p.svg', 'doc.dvi' }, dir, function(svg_ok)
+    -- Display math is cropped to its ink; inline math keeps its strut box.
+    local bbox = items[1].inline and '--bbox=preview' or '--exact-bbox'
+    run({ 'dvisvgm', '--verbosity=1', '--no-fonts', bbox, '-p1-', '-o', 'page-%p.svg', 'doc.dvi' }, dir, function(svg_ok)
       if not svg_ok then
         return fail('dvisvgm failed')
       end
@@ -219,31 +254,40 @@ local function render(items, on_done)
       end
 
       -- Report the batch at once, so waiting cells render once with all of it.
-      local pending, errors = #items, {}
-      for i, item in ipairs(items) do
-        rasterize(item, pages[i], function(err)
+      local started, pending, errors = 0, #items, {}
+      local function rasterize_next()
+        started = started + 1
+        local i = started
+        if i > #items then
+          return
+        end
+        rasterize(items[i], pages[i], function(err)
           errors[i] = err
           pending = pending - 1
-          if pending == 0 then
-            vim.fn.delete(dir, 'rf')
-            for j, done_item in ipairs(items) do
-              finish(done_item, errors[j])
-            end
-            on_done()
+          if pending > 0 then
+            return rasterize_next()
           end
+          vim.fn.delete(dir, 'rf')
+          for j, item in ipairs(items) do
+            finish(item, errors[j])
+          end
+          on_done()
         end)
+      end
+      for _ = 1, math.min(MAX_RASTERIZERS, #items) do
+        rasterize_next()
       end
     end)
   end)
 end
 
----Render everything queued since the last flush, one batch per color and
----geometry
+---Render everything queued since the last flush, one batch per color,
+---geometry and kind (display or inline)
 local function flush()
   flush_scheduled = false
   local batches = {}
   for _, item in ipairs(queue) do
-    local id = table.concat({ item.fg, item.dpi, item.cell_width, item.cell_height }, ':')
+    local id = table.concat({ item.fg, item.dpi, item.cell_width, item.cell_height, tostring(item.inline) }, ':')
     batches[id] = batches[id] or {}
     table.insert(batches[id], item)
   end
@@ -257,13 +301,19 @@ end
 ---Sources requested in the same tick are rendered together.
 ---@param source string LaTeX source, as found in a text/latex output
 ---@param on_ready fun() Called when a render started for this source finishes
----@param hl string|nil Highlight group for the math color (default: IpynbMath)
+---@param opts { hl: string|nil, inline: boolean|nil }|nil hl: highlight group for
+---  the color (default: IpynbMath); inline: render one row tall, e.g. for `$x$`
 ---@return string|nil path PNG file, when the source is already rendered
 ---@return string|nil error Why rendering this source failed
-function M.lookup(source, on_ready, hl)
-  local fg = foreground(hl or 'IpynbMath')
+function M.lookup(source, on_ready, opts)
+  opts = opts or {}
+  local fg = foreground(opts.hl or 'IpynbMath')
   local dpi, cell_width, cell_height = geometry()
-  local key = vim.fn.sha256(table.concat({ TEMPLATE_VERSION, fg, dpi, cell_width, cell_height, source }, '\0'))
+  local parts = { TEMPLATE_VERSION, fg, dpi, cell_width, cell_height, source }
+  if opts.inline then
+    table.insert(parts, 1, 'inline')
+  end
+  local key = vim.fn.sha256(table.concat(parts, '\0'))
   if failed[key] then
     return nil, failed[key]
   end
@@ -285,6 +335,7 @@ function M.lookup(source, on_ready, hl)
     dpi = dpi,
     cell_width = cell_width,
     cell_height = cell_height,
+    inline = opts.inline == true,
   })
   if not flush_scheduled then
     flush_scheduled = true
