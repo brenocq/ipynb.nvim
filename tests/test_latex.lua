@@ -1,4 +1,5 @@
--- LaTeX output rendering: text/latex sources become PNGs through latex + dvipng.
+-- LaTeX output rendering: text/latex sources become PNGs through latex,
+-- dvisvgm and rsvg-convert.
 -- Run: nvim --headless -u tests/minimal_init.lua -l tests/test_latex.lua
 
 local h = require('tests.helpers')
@@ -16,12 +17,12 @@ config.get().images.cache_dir = vim.fn.tempname()
 
 local have_tools = latex.is_available()
 if not have_tools then
-  print('  (latex/dvipng not found: rendering tests are skipped)')
+  print('  (' .. table.concat(latex.tools, ', ') .. ' not all found: rendering tests are skipped)')
 end
 
 ---Look up sources in one tick and wait for every started render to finish
 ---@param sources string[]
----@return table<string, { path: string|nil, failed: boolean }>
+---@return table<string, { path: string|nil, err: string|nil }>
 local function render_all(sources)
   local pending = 0
   for _, source in ipairs(sources) do
@@ -38,8 +39,8 @@ local function render_all(sources)
 
   local results = {}
   for _, source in ipairs(sources) do
-    local path, failed = latex.lookup(source, function() end)
-    results[source] = { path = path, failed = failed }
+    local path, err = latex.lookup(source, function() end)
+    results[source] = { path = path, err = err }
   end
   return results
 end
@@ -75,14 +76,18 @@ h.run_test('renders_png_and_reuses_it', function()
     return
   end
   local source = '$\\displaystyle \\sum_{n=1}^{\\infty} \\frac{1}{n^{2}}$'
-  local path, failed = latex.lookup(source, function() end)
+  local path, err = latex.lookup(source, function() end)
   h.assert_eq(path, nil, 'First lookup should start a render')
-  h.assert_false(failed)
+  h.assert_eq(err, nil)
 
   local result = render_all({ source })[source]
   h.assert_true(result.path ~= nil, 'Render should produce a file')
+  -- kitty fits an image to its cells: whole cells keep it from being rescaled.
   local width, height = png_size(result.path)
+  local cell_width, cell_height = images.cell_size()
   h.assert_true(width > 0 and height > 0, 'PNG should have a size')
+  h.assert_eq(width % cell_width, 0, 'Image width should be whole cells')
+  h.assert_eq(height % cell_height, 0, 'Image height should be whole cells')
 
   local called = false
   local again = latex.lookup(source, function()
@@ -102,7 +107,7 @@ h.run_test('broken_formula_does_not_break_its_batch', function()
   h.assert_true(results[good1].path ~= nil, 'Formula before the broken one should render')
   h.assert_true(results[good2].path ~= nil, 'Formula after the broken one should render')
   h.assert_eq(results[bad].path, nil)
-  h.assert_true(results[bad].failed, 'Broken formula should be reported as failed')
+  h.assert_eq(results[bad].err, 'File ended while scanning use of \\frac', 'Failure should carry the LaTeX error')
 end)
 
 h.run_test('color_and_scale_are_part_of_the_image', function()
@@ -209,7 +214,7 @@ h.run_test('output_shows_text_until_its_latex_image_is_ready', function()
   end)
 end)
 
-h.run_test('output_keeps_text_when_latex_fails', function()
+h.run_test('output_shows_source_and_error_when_latex_fails', function()
   if not have_tools then
     return
   end
@@ -217,11 +222,13 @@ h.run_test('output_keeps_text_when_latex_fails', function()
     local source = '$\\undefinedcommand{x}$'
     local state = open_with_latex_output(source)
     h.assert_true(vim.wait(20000, function()
-      local _, failed = latex.lookup(source, function() end)
-      return failed
-    end, 10), 'The render should fail')
-    vim.wait(50)
-    h.assert_true(output_lines(state, 1):find('Out: x**2', 1, true) ~= nil, 'text/plain should remain')
+      return output_lines(state, 1):find('LaTeX error', 1, true) ~= nil
+    end, 10), 'The failure should be shown')
+    h.assert_eq(output_lines(state, 1), table.concat({
+      '┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄',
+      'Out: ' .. source,
+      'LaTeX error: Undefined control sequence',
+    }, '\n'))
   end)
 end)
 

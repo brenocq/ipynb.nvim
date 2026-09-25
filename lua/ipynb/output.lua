@@ -266,9 +266,10 @@ function M.build_output_text(cell)
   return lines
 end
 
----Get image lines showing an output's text/latex entry. Returns nil when the
----output has no LaTeX, it cannot be shown as an image, or its render is still
----running or failed; the caller then falls back to text/plain.
+---Get lines showing an output's text/latex entry: the rendered image, or the
+---source and error when it fails to compile. Returns nil when the output has
+---no LaTeX, it cannot be shown as an image, or its render is still running;
+---the caller then falls back to text/plain.
 ---@param state NotebookState
 ---@param cell table Cell object
 ---@param output table Output object
@@ -281,11 +282,19 @@ local function latex_virt_lines(state, cell, output, on_ready)
   if not source or not latex_mod.is_available() or not images_mod.supports_placeholders() then
     return nil
   end
-  local path = latex_mod.lookup(source, on_ready)
-  if not path then
-    return nil
+  local path, err = latex_mod.lookup(source, on_ready)
+  if path then
+    return (images_mod.get_file_virt_lines(state, cell, path))
   end
-  return (images_mod.get_file_virt_lines(state, cell, path))
+  if err then
+    -- text/plain of a LaTeX-only object is just its repr (<...Math object>),
+    -- so show what failed and why instead.
+    local lines = {}
+    add_text_plain_lines(lines, source, output.output_type == 'execute_result' and 'Out: ' or nil, 'IpynbOutput')
+    table.insert(lines, { { 'LaTeX error: ' .. err, 'IpynbOutputError' } })
+    return lines
+  end
+  return nil
 end
 
 ---Render outputs for a cell as virtual lines with true text/image interleaving

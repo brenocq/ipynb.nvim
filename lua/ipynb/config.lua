@@ -60,7 +60,7 @@ local M = {}
 ---@field toggle_auto_hover string Toggle inspect auto-hover (default: '<leader>kH')
 
 ---@class LatexConfig
----@field enabled boolean Render text/latex outputs as images (needs latex, dvipng and image support) (default: true)
+---@field enabled boolean Render text/latex outputs as images (needs latex, dvisvgm, rsvg-convert and image support) (default: true)
 ---@field scale number Size of rendered math relative to the terminal font (default: 1)
 
 ---@class FoldingConfig
@@ -189,7 +189,7 @@ M.defaults = {
 		max_height = nil, -- nil = window height minus scrolloff minus 1
 	},
 	latex = {
-		enabled = true, -- Render text/latex outputs as images (needs latex + dvipng and image support)
+		enabled = true, -- Render text/latex outputs as images (needs latex, dvisvgm, rsvg-convert and image support)
 		scale = 1, -- Size of rendered math relative to the terminal font
 	},
 	inspector = {

@@ -131,11 +131,16 @@ local function check_optional()
     health.info('snacks.nvim not installed (optional, for inline images)')
   end
 
-  -- latex + dvipng for text/latex outputs
-  if vim.fn.executable('latex') == 1 and vim.fn.executable('dvipng') == 1 then
-    health.ok('latex and dvipng found (LaTeX outputs render as images)')
+  -- latex, dvisvgm and rsvg-convert for text/latex outputs
+  local latex_tools = require('ipynb.latex').tools
+  local missing = vim.tbl_filter(function(tool)
+    return vim.fn.executable(tool) == 0
+  end, latex_tools)
+  if #missing == 0 then
+    health.ok(table.concat(latex_tools, ', ') .. ' found (LaTeX outputs render as images)')
   else
-    health.info('latex/dvipng not found (optional, to render LaTeX outputs as images; install TeX Live)')
+    health.info(table.concat(missing, ', ') .. ' not found (optional, to render LaTeX outputs as images;'
+      .. ' latex and dvisvgm come with TeX Live, rsvg-convert with librsvg)')
   end
 end
 

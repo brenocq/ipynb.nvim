@@ -40,7 +40,7 @@ Under the hood, the notebook is rendered into a single buffer for display. Enter
 - [snacks.nvim](https://github.com/folke/snacks.nvim) for inline image rendering
   - a terminal that fully supports the kitty graphics protocol (e.g., kitty, Ghostty)
   - ImageMagick required to display non-PNG image formats
-- `latex` and `dvipng` (included in TeX Live) to render LaTeX outputs as images; without them LaTeX outputs show as plain text
+- `latex` and `dvisvgm` (included in TeX Live) and `rsvg-convert` (from librsvg) to render LaTeX outputs as images; without them LaTeX outputs show as plain text
 
 Run `:checkhealth ipynb` to verify your setup.
 
@@ -301,7 +301,7 @@ require("ipynb").setup({
     max_height = nil,  -- nil = window height minus scrolloff minus 1
   },
   latex = {
-    enabled = true,    -- Render text/latex outputs as images (needs latex + dvipng and image support)
+    enabled = true,    -- Render text/latex outputs as images (needs latex, dvisvgm, rsvg-convert and image support)
     scale = 1,         -- Size of rendered math relative to the terminal font
   },
   inspector = {
@@ -462,7 +462,7 @@ If `:lua print(require("snacks").image.supports_terminal())` returns `true` but 
 
 **LaTeX outputs show as plain text**
 
-LaTeX outputs are rendered with `latex` and `dvipng`, so they need both on your `PATH` (check `:checkhealth ipynb`) as well as working image support. An output whose LaTeX fails to compile keeps its plain-text form. Rendered images are cached under `images.cache_dir`.
+LaTeX outputs are rendered with `latex`, `dvisvgm` and `rsvg-convert`, so they need all three on your `PATH` (check `:checkhealth ipynb`) as well as working image support. An output whose LaTeX fails to compile shows its source and the LaTeX error instead. Rendered images are cached under `images.cache_dir`.
 
 ## 🗺️ Roadmap
 

@@ -1,12 +1,17 @@
--- ipynb/latex.lua - Render LaTeX to PNG images with latex + dvipng
--- The same pipeline IPython and euporie use. Every source requested during one
--- event loop tick goes into a single document, one page each, so rendering a
--- notebook full of formulas costs one latex run instead of one per formula.
+-- ipynb/latex.lua - Render LaTeX to PNG images
+-- latex typesets every source requested during one event loop tick as a single
+-- document, one page each, so a notebook full of formulas costs one latex run.
+-- dvisvgm turns the pages into SVGs, and rsvg-convert rasterizes each one onto
+-- a canvas that is a whole number of terminal cells: kitty fits images to their
+-- cells, and any rescaling there would blur the math.
 
 local M = {}
 
--- Part of every cache key: bump it when the document changes.
-local TEMPLATE_VERSION = '1'
+-- Executables the pipeline needs, in the order it runs them.
+M.tools = { 'latex', 'dvisvgm', 'rsvg-convert' }
+
+-- Part of every cache key: bump it when the document or rasterization changes.
+local TEMPLATE_VERSION = '2'
 
 -- showonlyrefs keeps amsmath from numbering every align/equation line, which
 -- Jupyter's MathJax does not do either.
@@ -19,7 +24,7 @@ local PREAMBLE = [[
 \begin{document}]]
 
 local tools_found = nil ---@type boolean|nil
-local failed = {} ---@type table<string, boolean> Sources that failed to render, by key
+local failed = {} ---@type table<string, string> Why sources failed to render, by key
 local waiting = {} ---@type table<string, fun()[]> Callbacks of renders in flight, by key
 local queue = {} ---@type table[] Renders requested since the last flush
 local flush_scheduled = false
@@ -32,7 +37,10 @@ function M.is_available()
     return false
   end
   if tools_found == nil then
-    tools_found = vim.fn.executable('latex') == 1 and vim.fn.executable('dvipng') == 1
+    tools_found = true
+    for _, tool in ipairs(M.tools) do
+      tools_found = tools_found and vim.fn.executable(tool) == 1
+    end
   end
   return tools_found
 end
@@ -64,13 +72,16 @@ local function foreground()
   return vim.o.background == 'light' and '000000' or 'FFFFFF'
 end
 
----Resolution that makes one line of math as tall as one terminal row: the
----document is set in 10pt, whose lines are 12pt apart.
+---Rendering geometry: the resolution makes one line of math as tall as one
+---terminal row (the document is set in 10pt, whose lines are 12pt apart), and
+---images are padded to whole cells.
 ---@return number dpi
-local function resolution()
-  local _, cell_height = require('ipynb.images').cell_size()
+---@return number cell_width Pixels
+---@return number cell_height Pixels
+local function geometry()
+  local cell_width, cell_height = require('ipynb.images').cell_size()
   local scale = (require('ipynb.config').get().latex or {}).scale or 1
-  return math.max(1, math.floor(cell_height * 72.27 / 12 * scale + 0.5))
+  return cell_height * 72.27 / 12 * scale, cell_width, cell_height
 end
 
 ---@return string
@@ -98,13 +109,28 @@ local function run(cmd, dir, on_done)
   end
 end
 
+---First error LaTeX reported in the build directory's log
+---@param dir string
+---@return string
+local function latex_error(dir)
+  local log = dir .. '/doc.log'
+  if vim.fn.filereadable(log) == 0 then
+    return 'latex failed'
+  end
+  for _, line in ipairs(vim.fn.readfile(log)) do
+    local message = line:match('^! (.+)')
+    if message then
+      return (message:gsub('%s*%.$', ''))
+    end
+  end
+  return 'latex failed'
+end
+
 ---Report the outcome of one render to everyone waiting on it
 ---@param item table
----@param ok boolean
-local function finish(item, ok)
-  if not ok then
-    failed[item.key] = true
-  end
+---@param err string|nil Why the render failed
+local function finish(item, err)
+  failed[item.key] = err
   local callbacks = waiting[item.key] or {}
   waiting[item.key] = nil
   for _, callback in ipairs(callbacks) do
@@ -112,7 +138,38 @@ local function finish(item, ok)
   end
 end
 
----Render items sharing a color and resolution as one document, one page each.
+---Rasterize one page onto a canvas of whole cells, the math centered
+---vertically, into the item's cache file
+---@param item table
+---@param svg string Path to the page's SVG
+---@param on_done fun(err: string|nil)
+local function rasterize(item, svg, on_done)
+  local head = table.concat(vim.fn.readfile(svg, '', 5), '\n')
+  local width_pt = tonumber(head:match('width=["\']([%d.]+)pt["\']'))
+  local height_pt = tonumber(head:match('height=["\']([%d.]+)pt["\']'))
+  if not width_pt or not height_pt then
+    return on_done('dvisvgm wrote an SVG without a size')
+  end
+
+  -- rsvg-convert reads SVG pt as 1/72 inch
+  local width, height = width_pt * item.dpi / 72, height_pt * item.dpi / 72
+  local canvas_width = math.max(1, math.ceil(width / item.cell_width - 1e-6)) * item.cell_width
+  local canvas_height = math.max(1, math.ceil(height / item.cell_height - 1e-6)) * item.cell_height
+  local dpi = ('%.3f'):format(item.dpi)
+  local png = svg:gsub('%.svg$', '.png')
+  run({
+    'rsvg-convert', '--dpi-x', dpi, '--dpi-y', dpi,
+    '--page-width', canvas_width .. 'px', '--page-height', canvas_height .. 'px',
+    '--top', ('%.3fpx'):format((canvas_height - height) / 2),
+    '-o', png, svg,
+  }, vim.fs.dirname(svg), function(ok)
+    -- Only complete images reach the cache, where they are trusted as is.
+    ok = ok and vim.uv.fs_rename(png, item.path) ~= nil
+    on_done(not ok and 'rsvg-convert failed' or nil)
+  end)
+end
+
+---Render items sharing a color and geometry as one document, one page each.
 ---A failing batch is split in half and retried, so one broken formula costs a
 ---few extra runs instead of taking every other formula down with it.
 ---@param items table[]
@@ -128,22 +185,13 @@ local function render(items, on_done)
   table.insert(doc, '\\end{document}')
   vim.fn.writefile(vim.split(table.concat(doc, '\n'), '\n'), dir .. '/doc.tex')
 
-  local function done(ok)
-    if ok then
-      -- Each item must have produced exactly one page.
-      ok = vim.uv.fs_stat(('%s/page%d.png'):format(dir, #items + 1)) == nil
-      for i, item in ipairs(items) do
-        ok = ok and vim.uv.fs_rename(('%s/page%d.png'):format(dir, i), item.path) ~= nil
-      end
-    end
+  ---The batch as a whole failed: report why for a single source, or retry halves
+  ---@param err string
+  local function fail(err)
     vim.fn.delete(dir, 'rf')
-
-    if ok or #items == 1 then
-      for _, item in ipairs(items) do
-        finish(item, ok)
-      end
-      on_done()
-      return
+    if #items == 1 then
+      finish(items[1], err)
+      return on_done()
     end
     local half = math.floor(#items / 2)
     render(vim.list_slice(items, 1, half), function()
@@ -153,22 +201,44 @@ local function render(items, on_done)
 
   run({ 'latex', '-no-shell-escape', '-halt-on-error', '-interaction=batchmode', 'doc.tex' }, dir, function(ok)
     if not ok then
-      return done(false)
+      return fail(latex_error(dir))
     end
-    run({
-      'dvipng', '-q', '-T', 'tight', '-D', tostring(items[1].dpi),
-      '-bg', 'Transparent', '-z', '9', '-o', 'page%d.png', 'doc.dvi',
-    }, dir, done)
+    run({ 'dvisvgm', '--verbosity=1', '--no-fonts', '--exact-bbox', '-p1-', '-o', 'page-%p.svg', 'doc.dvi' }, dir, function(svg_ok)
+      if not svg_ok then
+        return fail('dvisvgm failed')
+      end
+
+      -- dvisvgm pads page numbers to the width of the page count
+      local pages = {}
+      for _, svg in ipairs(vim.fn.glob(dir .. '/page-*.svg', false, true)) do
+        pages[tonumber(svg:match('page%-(%d+)%.svg$'))] = svg
+      end
+      if vim.tbl_count(pages) ~= #items then
+        return fail('the LaTeX does not fit on one page')
+      end
+
+      local pending = #items
+      for i, item in ipairs(items) do
+        rasterize(item, pages[i], function(err)
+          finish(item, err)
+          pending = pending - 1
+          if pending == 0 then
+            vim.fn.delete(dir, 'rf')
+            on_done()
+          end
+        end)
+      end
+    end)
   end)
 end
 
 ---Render everything queued since the last flush, one batch per color and
----resolution
+---geometry
 local function flush()
   flush_scheduled = false
   local batches = {}
   for _, item in ipairs(queue) do
-    local id = item.fg .. item.dpi
+    local id = table.concat({ item.fg, item.dpi, item.cell_width, item.cell_height }, ':')
     batches[id] = batches[id] or {}
     table.insert(batches[id], item)
   end
@@ -183,29 +253,38 @@ end
 ---@param source string LaTeX source, as found in a text/latex output
 ---@param on_ready fun() Called when a render started for this source finishes
 ---@return string|nil path PNG file, when the source is already rendered
----@return boolean failed Whether rendering this source failed
+---@return string|nil error Why rendering this source failed
 function M.lookup(source, on_ready)
-  local fg, dpi = foreground(), resolution()
-  local key = vim.fn.sha256(table.concat({ TEMPLATE_VERSION, fg, dpi, source }, '\0'))
+  local fg = foreground()
+  local dpi, cell_width, cell_height = geometry()
+  local key = vim.fn.sha256(table.concat({ TEMPLATE_VERSION, fg, dpi, cell_width, cell_height, source }, '\0'))
   if failed[key] then
-    return nil, true
+    return nil, failed[key]
   end
   local path = ('%s/%s.png'):format(cache_dir(), key)
   if vim.uv.fs_stat(path) then
-    return path, false
+    return path, nil
   end
 
   if waiting[key] then
     table.insert(waiting[key], on_ready)
-    return nil, false
+    return nil, nil
   end
   waiting[key] = { on_ready }
-  table.insert(queue, { key = key, source = source, path = path, fg = fg, dpi = dpi })
+  table.insert(queue, {
+    key = key,
+    source = source,
+    path = path,
+    fg = fg,
+    dpi = dpi,
+    cell_width = cell_width,
+    cell_height = cell_height,
+  })
   if not flush_scheduled then
     flush_scheduled = true
     vim.schedule(flush)
   end
-  return nil, false
+  return nil, nil
 end
 
 return M
