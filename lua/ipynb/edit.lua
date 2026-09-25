@@ -1085,6 +1085,24 @@ function M.global_redo(state)
   global_undo_redo(state, 'redo')
 end
 
+---Close the edit float without writing it back to its cell, for when the
+---document under it is replaced (reloaded from disk).
+---@param state NotebookState
+function M.discard(state)
+  local edit = state.edit_state
+  if not edit then
+    return
+  end
+  state.edit_state = nil
+  pcall(vim.api.nvim_del_augroup_by_name, edit_window_group_name(edit.buf))
+  if vim.api.nvim_buf_is_valid(edit.buf) then
+    vim.bo[edit.buf].modified = false
+  end
+  if vim.api.nvim_win_is_valid(edit.win) then
+    vim.api.nvim_win_close(edit.win, true)
+  end
+end
+
 ---Close edit float
 ---@param state NotebookState
 function M.close(state)

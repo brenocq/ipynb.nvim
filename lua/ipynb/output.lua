@@ -362,6 +362,7 @@ function M.clear_outputs(state, cell_idx)
 
   cell.outputs = {}
   cell._stream_state = nil
+  cell.outputs_unsaved = true
 end
 
 ---Clear all outputs

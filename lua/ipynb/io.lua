@@ -294,6 +294,52 @@ function M.jupytext_to_cells(lines)
   return cells
 end
 
+---Replace the document of an open notebook in place.
+---The kernel's message callbacks hold the state object, so reloading must keep
+---it rather than build a new one: a fresh state would strand the kernel.
+---@param state NotebookState
+---@param cells Cell[]
+---@param metadata table
+---@param cell_ids table<string, boolean>
+local function reload_notebook(state, cells, metadata, cell_ids)
+  -- An open edit float points at a cell index and line range of the outgoing
+  -- document. Unsynced edits in it would have marked the facade modified, so
+  -- getting here means the user chose to reload over them.
+  require('ipynb.edit').discard(state)
+  require('ipynb.images').clear_all_images(state)
+
+  local old_by_id = {}
+  for _, cell in ipairs(state.cells) do
+    if cell.id then
+      old_by_id[cell.id] = cell
+    end
+  end
+  for _, cell in ipairs(cells) do
+    local old = cell.id and old_by_id[cell.id]
+    if old then
+      cell.execution_state = old.execution_state
+      -- Outputs produced since the last save exist only in memory: keep them
+      -- while the code that produced them is unchanged. Otherwise disk wins.
+      if old.outputs_unsaved and old.source == cell.source then
+        cell.outputs = old.outputs
+        cell.execution_count = old.execution_count
+        cell.outputs_unsaved = true
+        cell._stream_state = old._stream_state
+      end
+    end
+  end
+
+  state.cells = cells
+  state.metadata = metadata
+  state.cell_ids = cell_ids
+
+  -- :edit! unloads the buffer first, which detaches its highlighter.
+  if not vim.treesitter.highlighter.active[state.facade_buf] then
+    vim.treesitter.start(state.facade_buf, 'ipynb')
+  end
+  require('ipynb.facade').refresh(state)
+end
+
 ---Open a notebook file (or create new if doesn't exist)
 ---@param buf number Buffer to populate
 ---@param path string Path to .ipynb file
@@ -308,6 +354,14 @@ function M.open_notebook(buf, path)
     -- Create new empty notebook
     cells, metadata, cell_ids = M.create_empty_notebook()
     vim.notify('New notebook: ' .. vim.fn.fnamemodify(path, ':t'), vim.log.levels.INFO)
+  end
+
+  -- BufReadCmd re-fires on an open notebook when it is reloaded from disk
+  -- (:edit!, or autoread after an external change).
+  local existing = state_mod.notebooks[buf]
+  if existing then
+    reload_notebook(existing, cells, metadata, cell_ids)
+    return
   end
 
   -- Create state
@@ -368,6 +422,9 @@ function M.save_notebook(buf, path)
 
   -- Mark buffer as saved
   vim.bo[buf].modified = false
+  for _, cell in ipairs(state.cells) do
+    cell.outputs_unsaved = nil
+  end
 
   vim.notify('Saved notebook: ' .. path, vim.log.levels.INFO)
 end

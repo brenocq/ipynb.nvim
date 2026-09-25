@@ -96,8 +96,10 @@ function M.create(state, buf)
     end,
   })
 
-  -- Setup cleanup autocmd
-  vim.api.nvim_create_autocmd('BufUnload', {
+  -- Cleanup on deletion only: BufUnload also fires when :edit! reloads the
+  -- notebook, and the state must survive that (see io.open_notebook). Exit is
+  -- covered by the VimLeavePre handler in init.lua.
+  vim.api.nvim_create_autocmd({ 'BufDelete', 'BufWipeout' }, {
     buffer = buf,
     callback = function()
       require('ipynb.state').remove(buf)

@@ -123,6 +123,18 @@ function M.setup(opts)
     end,
   })
 
+  -- Buffers are unloaded but never deleted on exit, so the BufDelete cleanup
+  -- in facade.create does not run: clean up every open notebook here.
+  vim.api.nvim_create_autocmd('VimLeavePre', {
+    group = vim.api.nvim_create_augroup('NotebookCleanup', { clear = true }),
+    callback = function()
+      local state_mod = require('ipynb.state')
+      for buf in pairs(state_mod.notebooks) do
+        state_mod.remove(buf)
+      end
+    end,
+  })
+
   -- Setup user commands
   require('ipynb.commands').setup()
 end
