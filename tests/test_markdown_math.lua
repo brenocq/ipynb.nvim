@@ -1,4 +1,5 @@
--- Display math ($$...$$) in markdown cells, rendered in place of its source.
+-- Math in markdown cells ($$ blocks and inline $...$), rendered in place of
+-- its source.
 -- Run: nvim --headless -u tests/minimal_init.lua -l tests/test_markdown_math.lua
 
 local h = require('tests.helpers')
@@ -8,7 +9,7 @@ local latex = require('ipynb.latex')
 local markdown_math = require('ipynb.markdown_math')
 
 print(string.rep('=', 60))
-print('Running markdown display math tests')
+print('Running markdown math tests')
 print(string.rep('=', 60))
 
 config.get().images.cache_dir = vim.fn.tempname()
@@ -18,9 +19,9 @@ if not have_tools then
   print('  (' .. table.concat(latex.tools, ', ') .. ' not all found: rendering tests are skipped)')
 end
 
-h.run_test('finds_only_blocks_on_their_own_lines', function()
+h.run_test('finds_display_blocks_and_inline_math', function()
   local source = table.concat({
-    'Inline $a+b$ and mid-sentence $$x^2$$ stay source.', -- 0
+    'Inline $a+b$ and mid-sentence $$x^2$$ render inline.', -- 0
     '',
     '$$\\int_0^1 x\\,dx$$', -- 2
     '',
@@ -34,16 +35,22 @@ h.run_test('finds_only_blocks_on_their_own_lines', function()
     '```',
     '$$not math$$',
     '```',
+    'Prices $5 and $10, spaced $ x $ and `$code$` are not math, but $x$.', -- 14
   }, '\n')
   local found = {}
-  for _, block in ipairs(markdown_math.find_display_math(source)) do
-    table.insert(found, ('%d-%d %s'):format(block.first, block.last, block.text:gsub('\n', ' ')))
+  for _, block in ipairs(markdown_math.find_math(source)) do
+    local kind = block.display and 'display' or 'inline'
+    local text = block.text:gsub('\n', ' ')
+    table.insert(found, ('%s %d:%d-%d:%d %s'):format(kind, block.first, block.first_col, block.last, block.last_col, text))
   end
-  h.assert_eq(table.concat(found, ' | '), table.concat({
-    '2-2 $$\\int_0^1 x\\,dx$$',
-    '4-6 $$ \\sum_{n=1}^\\infty \\frac{1}{n^2} $$',
-    '9-9 $$ e^{i\\pi} + 1 = 0 $$',
-  }, ' | '))
+  h.assert_eq(table.concat(found, '\n'), table.concat({
+    'inline 0:7-0:12 $a+b$',
+    'inline 0:30-0:37 $x^2$',
+    'display 2:0-2:18 $$\\int_0^1 x\\,dx$$',
+    'display 4:0-6:2 $$ \\sum_{n=1}^\\infty \\frac{1}{n^2} $$',
+    'display 9:2-9:24 $$ e^{i\\pi} + 1 = 0 $$',
+    'inline 14:63-14:66 $x$',
+  }, '\n'))
 end)
 
 -- The terminal image layer needs a graphics terminal: stand in with marker
@@ -86,7 +93,7 @@ end
 local function drawn(state)
   local rows = {}
   for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(state.facade_buf, markdown_math.ns, 0, -1, { details = true })) do
-    local row, details, parts = mark[2], mark[4], {}
+    local row, details, parts = mark[3] > 0 and (mark[2] .. ':' .. mark[3]) or mark[2], mark[4], {}
     if details.conceal then
       table.insert(parts, 'conceal')
     end
@@ -179,6 +186,18 @@ h.run_test('cell_operations_keep_math_in_place', function()
     -- The new empty cell takes rows 0-2 and a blank line; the math moves to row 5.
     h.assert_true(wait_drawn(state, '5: conceal'), 'The math should follow its cell')
     h.assert_eq(drawn(state):find('1: ', 1, true), nil, 'Nothing should be left at the old row')
+  end)
+end)
+
+h.run_test('inline_math_replaces_its_source_within_the_line', function()
+  if not have_tools then
+    return
+  end
+  with_fake_image_layer(function()
+    -- Buffer row 1: 'Energy $E = mc^2$ and $$x$$ inline.'
+    local state = open_markdown({ 'Energy $E = mc^2$ and $$x$$ inline, not $5.' })
+    h.assert_true(wait_drawn(state, '1:22'), 'The math should render')
+    h.assert_eq(drawn(state), '1:7: conceal [image row 1]\n1:22: conceal [image row 1]')
   end)
 end)
 

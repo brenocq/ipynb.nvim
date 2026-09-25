@@ -98,6 +98,45 @@ h.run_test('renders_png_and_reuses_it', function()
   h.assert_false(called, 'A cached source should not render again')
 end)
 
+h.run_test('inline_math_is_exactly_one_row_tall', function()
+  if not have_tools then
+    return
+  end
+  -- 16x32 cells round the fraction's offset slightly negative: rsvg-convert
+  -- must not mistake it for an option. The last two are taller than a line
+  -- of text, so they are shrunk to fit.
+  local cell_size = images.cell_size
+  images.cell_size = function()
+    return 16, 32
+  end
+  local ok, err = xpcall(function()
+    local sources = { '$E = mc^2$', '$\\bar{x} = \\frac{1}{n}\\sum x_i$', '$\\frac{\\sum_{i=1}^{n} x_i}{n}$' }
+    local pending = 0
+    for _, source in ipairs(sources) do
+      if not latex.lookup(source, function()
+        pending = pending - 1
+      end, { inline = true }) then
+        pending = pending + 1
+      end
+    end
+    assert(vim.wait(20000, function()
+      return pending == 0
+    end, 10), 'Renders should finish')
+    for _, source in ipairs(sources) do
+      local path, render_err = latex.lookup(source, function() end, { inline = true })
+      h.assert_true(path ~= nil, ('Inline math should render: %s (%s)'):format(source, tostring(render_err)))
+      local width, height = png_size(path)
+      h.assert_eq(height, 32, 'Inline math should be one row: ' .. source)
+      h.assert_eq(width % 16, 0, 'Inline math should be whole cells wide: ' .. source)
+    end
+    local plain = sources[1]
+    h.assert_true(latex.lookup(plain, function() end, { inline = true }) ~= render_all({ plain })[plain].path,
+      'Inline and display renders are cached apart')
+  end, debug.traceback)
+  images.cell_size = cell_size
+  assert(ok, err)
+end)
+
 h.run_test('broken_formula_does_not_break_its_batch', function()
   if not have_tools then
     return
