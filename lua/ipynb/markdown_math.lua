@@ -144,7 +144,7 @@ end
 
 ---Draw (or redraw) image rows hanging below a block, with the cell's border
 ---@param buf number
----@param entry { id: number, indent: table, rows: table[], applied: string|nil }
+---@param entry { id: number, rows: { indent: table, row: table }[], applied: string|nil }
 ---@param border_hl string
 local function draw_hanging(buf, entry, border_hl)
   local gutter = border_gutter(buf, border_hl)
@@ -155,7 +155,7 @@ local function draw_hanging(buf, entry, border_hl)
   end
   local lines = {}
   for _, row in ipairs(entry.rows) do
-    local line = vim.list_extend(vim.deepcopy(gutter or {}), { entry.indent, row[1] })
+    local line = vim.list_extend(vim.deepcopy(gutter or {}), { row.indent, row.row[1] })
     table.insert(lines, line)
   end
   vim.api.nvim_buf_set_extmark(buf, ns, pos[1], 0, {
@@ -189,12 +189,23 @@ end
 ---@param indent table Chunk indenting the image
 ---@param image_rows table[] Placeholder rows, one virt_line entry each
 local function hang(buf, cell, row, indent, image_rows)
-  local entry = {
-    id = vim.api.nvim_buf_set_extmark(buf, ns, row, 0, {}),
-    indent = indent,
-    rows = image_rows,
-  }
   hanging[cell] = hanging[cell] or {}
+  -- Blocks hanging from the same line share one set of virtual lines: the
+  -- order of separate sets on one line is not kept when they are redrawn.
+  for _, entry in ipairs(hanging[cell]) do
+    local pos = vim.api.nvim_buf_get_extmark_by_id(buf, ns, entry.id, {})
+    if pos[1] == row then
+      for _, image_row in ipairs(image_rows) do
+        table.insert(entry.rows, { indent = indent, row = image_row })
+      end
+      entry.applied = nil
+      return draw_hanging(buf, entry, border_hls[cell] or 'IpynbBorder')
+    end
+  end
+  local entry = { id = vim.api.nvim_buf_set_extmark(buf, ns, row, 0, {}), rows = {} }
+  for _, image_row in ipairs(image_rows) do
+    table.insert(entry.rows, { indent = indent, row = image_row })
+  end
   table.insert(hanging[cell], entry)
   draw_hanging(buf, entry, border_hls[cell] or 'IpynbBorder')
 end
@@ -371,7 +382,7 @@ local function render_cell(state, cell_idx)
     local first_row, last_row = content_start + block.first, content_start + block.last
     local path, err = latex.lookup(block.text, rerender, { hl = 'IpynbMarkdownMath', inline = not block.display })
     if path then
-      local image_rows = images.get_file_virt_lines(state, image_owner(cell), path)
+      local image_rows = images.get_file_virt_lines(state, image_owner(cell), path, rerender)
       if image_rows and block.display then
         -- A block right below another hidden one hangs from the same line.
         local anchor = (hidden and hidden.last == first_row - 1) and hidden.anchor or first_row - 1

@@ -284,7 +284,7 @@ local function latex_virt_lines(state, cell, output, on_ready)
   end
   local path, err = latex_mod.lookup(source, on_ready)
   if path and cell.id then
-    return (images_mod.get_file_virt_lines(state, cell.id, path))
+    return (images_mod.get_file_virt_lines(state, cell.id, path, on_ready))
   end
   if err then
     -- text/plain of a LaTeX-only object is just its repr (<...Math object>),

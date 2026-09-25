@@ -224,6 +224,34 @@ local function get_or_create_image(path)
 	return img
 end
 
+-- Callbacks waiting for snacks to get an image ready, by path
+local waiting_ready = {} ---@type table<string, fun()[]>
+
+---Call back once snacks has an image ready (or given up on it). snacks runs
+---every image through a conversion queue, a few at a time, so opening a
+---notebook full of images can keep some waiting for a while.
+---@param img snacks.Image
+---@param path string
+---@param callback fun()
+local function when_ready(img, path, callback)
+	if waiting_ready[path] then
+		table.insert(waiting_ready[path], callback)
+		return
+	end
+	waiting_ready[path] = { callback }
+	local function poll()
+		if not (img:ready() or img:failed()) then
+			return vim.defer_fn(poll, 50)
+		end
+		local callbacks = waiting_ready[path]
+		waiting_ready[path] = nil
+		for _, cb in ipairs(callbacks) do
+			cb()
+		end
+	end
+	vim.defer_fn(poll, 50)
+end
+
 --------------------------------------------------------------------------------
 -- Public API
 --------------------------------------------------------------------------------
@@ -303,14 +331,20 @@ end
 ---@param cell_id string Key the image is tracked under for cleanup (usually a cell ID)
 ---@param path string Path to the image file
 ---@param owned boolean Whether the file belongs to this cell and is deleted with its images
+---@param on_ready fun()|nil Instead of waiting for an image that is not ready,
+---  return nil at once and call this when it is
 ---@return table[]|nil virt_line_entries Array of virt_line entries, or nil if failed
 ---@return number height Height of the image in terminal rows
-local function file_virt_lines(state, cell_id, path, owned)
+local function file_virt_lines(state, cell_id, path, owned, on_ready)
 	local Snacks = require("snacks")
 
 	-- Get or create snacks Image (handles sending image data to terminal)
 	local img = get_or_create_image(path)
 	if not img then
+		return nil, 0
+	end
+	if on_ready and not (img:ready() or img:failed()) then
+		when_ready(img, path, on_ready)
 		return nil, 0
 	end
 
@@ -475,13 +509,15 @@ end
 ---@param state NotebookState
 ---@param owner string Key the image is tracked under, cleared with clear_images
 ---@param path string Path to the image file
----@return table[]|nil virt_line_entries Array of virt_line entries, or nil if failed
+---@param on_ready fun() Called when an image that is not ready yet becomes ready
+---@return table[]|nil virt_line_entries Array of virt_line entries, or nil if
+---  failed or not ready yet
 ---@return number height Height of the image in terminal rows
-function M.get_file_virt_lines(state, owner, path)
+function M.get_file_virt_lines(state, owner, path, on_ready)
 	if not M.supports_placeholders() then
 		return nil, 0
 	end
-	return file_virt_lines(state, owner, path, false)
+	return file_virt_lines(state, owner, path, false, on_ready)
 end
 
 ---Clear images for a cell
