@@ -120,6 +120,22 @@ local TEXT_MIME_TYPES = {
 -- Cache for snacks.nvim availability check
 local snacks_available = nil
 
+---Size of one terminal cell in pixels (from snacks, with a fallback guess)
+---@return number cell_width
+---@return number cell_height
+function M.cell_size()
+	local cell_width, cell_height = 8, 16
+	local ok, Snacks = pcall(require, "snacks")
+	if ok and Snacks.image and Snacks.image.terminal then
+		local term_size = Snacks.image.terminal.size()
+		if term_size then
+			cell_width = term_size.cell_width or cell_width
+			cell_height = term_size.cell_height or cell_height
+		end
+	end
+	return cell_width, cell_height
+end
+
 ---Convert pixel dimensions to terminal cells
 ---@param width_px number|nil Width in pixels
 ---@param height_px number|nil Height in pixels
@@ -130,16 +146,7 @@ local function pixels_to_cells(width_px, height_px)
 		return nil, nil
 	end
 
-	-- Get actual terminal cell dimensions from snacks
-	local cell_width, cell_height = 8, 16
-	local ok, Snacks = pcall(require, "snacks")
-	if ok and Snacks.image and Snacks.image.terminal then
-		local term_size = Snacks.image.terminal.size()
-		if term_size then
-			cell_width = term_size.cell_width or cell_width
-			cell_height = term_size.cell_height or cell_height
-		end
-	end
+	local cell_width, cell_height = M.cell_size()
 
 	local width_cells, height_cells
 	if width_px then
@@ -158,7 +165,7 @@ end
 
 ---Get the cache directory for images
 ---@return string
-local function get_cache_dir()
+function M.get_cache_dir()
 	local config = require("ipynb.config").get()
 	local dir = config.images and config.images.cache_dir or (vim.fn.stdpath("cache") .. "/ipynb.nvim")
 	vim.fn.mkdir(dir, "p")
@@ -291,55 +298,15 @@ function M.get_image_data(output)
 	return false, nil, nil, false
 end
 
----Generate virt_lines entries for an image output
+---Generate virt_lines entries showing an image file
 ---@param state NotebookState
----@param cell table Cell object
----@param output table Output object containing image data
----@param image_index number Index of this image (1-based, for cache filename)
+---@param cell_id string Cell the image belongs to
+---@param path string Path to the image file
+---@param owned boolean Whether the file belongs to this cell and is deleted with its images
 ---@return table[]|nil virt_line_entries Array of virt_line entries, or nil if failed
 ---@return number height Height of the image in terminal rows
-function M.get_image_virt_lines(state, cell, output, image_index)
-	if not M.supports_placeholders() then
-		return nil, 0
-	end
-
-	local has_image, mime, image_data, is_text = M.get_image_data(output)
-	if not has_image or not mime or not image_data then
-		return nil, 0
-	end
-
+local function file_virt_lines(state, cell_id, path, owned)
 	local Snacks = require("snacks")
-	local cell_id = cell.id
-	if not cell_id then
-		return nil, 0
-	end
-
-	-- Decode/get file content
-	local file_content
-	if is_text then
-		file_content = image_data
-	else
-		file_content = base64_decode(image_data)
-	end
-
-	if not file_content then
-		return nil, 0
-	end
-
-	-- Write to cache file
-	local cache_dir = get_cache_dir()
-	local ext = MIME_EXTENSIONS[mime] or "png"
-	local data_hash = vim.fn.sha256(image_data):sub(1, 12)
-	local filename = string.format("%s-%d-%s.%s", cell_id, image_index, data_hash, ext)
-	local path = cache_dir .. "/" .. filename
-
-	if not write_binary_file(path, file_content) then
-		return nil, 0
-	end
-
-	-- File content may have changed between executions for the same cell/image index.
-	-- Drop cached object so snacks reloads fresh bytes from disk.
-	image_cache[path] = nil
 
 	-- Get or create snacks Image (handles sending image data to terminal)
 	local img = get_or_create_image(path)
@@ -445,9 +412,76 @@ function M.get_image_virt_lines(state, cell, output, image_index)
 		img = img,
 		placement_id = placement_id,
 		path = path,
+		owned = owned,
 	})
 
 	return virt_line_entries, img_height
+end
+
+---Generate virt_lines entries for an image output
+---@param state NotebookState
+---@param cell table Cell object
+---@param output table Output object containing image data
+---@param image_index number Index of this image (1-based, for cache filename)
+---@return table[]|nil virt_line_entries Array of virt_line entries, or nil if failed
+---@return number height Height of the image in terminal rows
+function M.get_image_virt_lines(state, cell, output, image_index)
+	if not M.supports_placeholders() then
+		return nil, 0
+	end
+
+	local has_image, mime, image_data, is_text = M.get_image_data(output)
+	if not has_image or not mime or not image_data then
+		return nil, 0
+	end
+
+	local cell_id = cell.id
+	if not cell_id then
+		return nil, 0
+	end
+
+	-- Decode/get file content
+	local file_content
+	if is_text then
+		file_content = image_data
+	else
+		file_content = base64_decode(image_data)
+	end
+
+	if not file_content then
+		return nil, 0
+	end
+
+	-- Write to cache file
+	local cache_dir = M.get_cache_dir()
+	local ext = MIME_EXTENSIONS[mime] or "png"
+	local data_hash = vim.fn.sha256(image_data):sub(1, 12)
+	local filename = string.format("%s-%d-%s.%s", cell_id, image_index, data_hash, ext)
+	local path = cache_dir .. "/" .. filename
+
+	if not write_binary_file(path, file_content) then
+		return nil, 0
+	end
+
+	-- File content may have changed between executions for the same cell/image index.
+	-- Drop cached object so snacks reloads fresh bytes from disk.
+	image_cache[path] = nil
+
+	return file_virt_lines(state, cell_id, path, true)
+end
+
+---Generate virt_lines entries for an image file that outlives the cell's
+---images, such as a cache entry shared between cells
+---@param state NotebookState
+---@param cell table Cell object
+---@param path string Path to the image file
+---@return table[]|nil virt_line_entries Array of virt_line entries, or nil if failed
+---@return number height Height of the image in terminal rows
+function M.get_file_virt_lines(state, cell, path)
+	if not M.supports_placeholders() or not cell.id then
+		return nil, 0
+	end
+	return file_virt_lines(state, cell.id, path, false)
 end
 
 ---Clear images for a cell
@@ -461,7 +495,7 @@ function M.clear_images(state, cell_id)
 	local ok, Snacks = pcall(require, "snacks")
 	if ok and Snacks.image and Snacks.image.terminal then
 		for _, entry in ipairs(state.images[cell_id]) do
-			if entry.path then
+			if entry.path and entry.owned then
 				image_cache[entry.path] = nil
 				pcall(vim.fn.delete, entry.path)
 			end

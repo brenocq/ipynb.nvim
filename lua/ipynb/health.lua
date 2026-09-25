@@ -130,6 +130,13 @@ local function check_optional()
   else
     health.info('snacks.nvim not installed (optional, for inline images)')
   end
+
+  -- latex + dvipng for text/latex outputs
+  if vim.fn.executable('latex') == 1 and vim.fn.executable('dvipng') == 1 then
+    health.ok('latex and dvipng found (LaTeX outputs render as images)')
+  else
+    health.info('latex/dvipng not found (optional, to render LaTeX outputs as images; install TeX Live)')
+  end
 end
 
 ---Check plugin configuration

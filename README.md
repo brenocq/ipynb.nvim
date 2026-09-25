@@ -12,6 +12,7 @@ A modal Jupyter notebook editor for Neovim.
 - Edit `.ipynb` files as actual notebooks with isolated cell buffers
 - Cell outputs render inline as virtual lines (open in float to copy)
 - Inline image rendering (PNG, JPEG, SVG, etc.)
+- LaTeX outputs (SymPy, `IPython.display.Math`) rendered as images
 - Variable inspector with auto-hover (uses Jupyter inspect protocol)
 - Partial language server support (diagnostics, completion, go to definition, rename)
 - Multi-language support (Python, Julia, R, and more)
@@ -39,6 +40,7 @@ Under the hood, the notebook is rendered into a single buffer for display. Enter
 - [snacks.nvim](https://github.com/folke/snacks.nvim) for inline image rendering
   - a terminal that fully supports the kitty graphics protocol (e.g., kitty, Ghostty)
   - ImageMagick required to display non-PNG image formats
+- `latex` and `dvipng` (included in TeX Live) to render LaTeX outputs as images; without them LaTeX outputs show as plain text
 
 Run `:checkhealth ipynb` to verify your setup.
 
@@ -274,6 +276,7 @@ require("ipynb").setup({
     border_active = "Number",     -- Cell border when in Cell mode
     exec_count = "Number",        -- Execution count [N]
     output = "Comment",           -- Output text
+    math = "IpynbOutput",         -- Rendered LaTeX outputs
     hint = "Comment",             -- Cell action keymap hints
     -- For statusline
     output_error = "DiagnosticError",
@@ -296,6 +299,10 @@ require("ipynb").setup({
     cache_dir = vim.fn.stdpath("cache") .. "/ipynb.nvim",
     max_width = nil,   -- nil = window width minus sign/number columns
     max_height = nil,  -- nil = window height minus scrolloff minus 1
+  },
+  latex = {
+    enabled = true,    -- Render text/latex outputs as images (needs latex + dvipng and image support)
+    scale = 1,         -- Size of rendered math relative to the terminal font
   },
   inspector = {
     -- Keymaps while in cell variable inspector float window
@@ -453,6 +460,10 @@ If `:lua print(require("snacks").image.supports_terminal())` returns `true` but 
 - Run `:checkhealth snacks` (not just `:checkhealth ipynb`)
 - Ensure ImageMagick tools are installed (`magick`/`convert`) for non-PNG conversion
 
+**LaTeX outputs show as plain text**
+
+LaTeX outputs are rendered with `latex` and `dvipng`, so they need both on your `PATH` (check `:checkhealth ipynb`) as well as working image support. An output whose LaTeX fails to compile keeps its plain-text form. Rendered images are cached under `images.cache_dir`.
+
 ## 🗺️ Roadmap
 
 ✅ **Working:**
@@ -462,6 +473,7 @@ If `:lua print(require("snacks").image.supports_terminal())` returns `true` but 
 - [x] Kernel execution and output capture
 - [x] Blocking stdin input prompts (`input()` / `getpass`)
 - [x] Inline image rendering
+- [x] LaTeX output rendering (`text/latex`)
 - [x] Variable inspector (Jupyter inspect protocol, auto-hover)
 - [x] Partial LSP support (diagnostics, completion, hover, definition, references, rename, formatting, document symbols, signature help, document highlight, inlay hints)
 - [x] Multi-language support (Python, Julia, R, etc.)
