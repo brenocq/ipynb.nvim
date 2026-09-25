@@ -12,7 +12,7 @@ local M = {}
 M.tools = { 'latex', 'dvisvgm', 'rsvg-convert' }
 
 -- Part of every cache key: bump it when the document or rasterization changes.
-local TEMPLATE_VERSION = '3'
+local TEMPLATE_VERSION = '4'
 
 -- showonlyrefs keeps amsmath from numbering every align/equation line, which
 -- Jupyter's MathJax does not do either.
@@ -120,10 +120,11 @@ end
 ---@return number dpi
 ---@return number cell_width Pixels
 ---@return number cell_height Pixels
+---@return number scale latex.scale
 local function geometry()
   local cell_width, cell_height = require('ipynb.images').cell_size()
   local scale = (require('ipynb.config').get().latex or {}).scale or 1
-  return cell_height * 72.27 / 12 * scale, cell_width, cell_height
+  return cell_height * 72.27 / 12 * scale, cell_width, cell_height, scale
 end
 
 ---@return string
@@ -290,7 +291,10 @@ local function render(items, on_done)
   for i, item in ipairs(items) do
     local body = vim.split(item.source, '\n')
     if item.inline then
-      body[1] = '\\begin{preview}' .. color .. '\\strut ' .. body[1]
+      -- The strut is one row at scale 1; a larger scale enlarges the math,
+      -- so the strut shrinks to keep the row one cell tall.
+      local strut = ('\\rule[-%.4fpt]{0pt}{%.4fpt}'):format(3.6 / item.scale, 12 / item.scale)
+      body[1] = '\\begin{preview}' .. color .. strut .. ' ' .. body[1]
       body[#body] = body[#body] .. '\\end{preview}'
     else
       -- A group keeps what one formula sets from reaching the next.
@@ -420,7 +424,7 @@ function M.lookup(source, on_ready, opts)
     source = unwrap_environment(source)
   end
   local fg = foreground(opts.hl or 'IpynbMath')
-  local dpi, cell_width, cell_height = geometry()
+  local dpi, cell_width, cell_height, scale = geometry()
   local parts = { TEMPLATE_VERSION, fg, dpi, cell_width, cell_height, source }
   if opts.inline then
     table.insert(parts, 1, 'inline')
@@ -447,6 +451,7 @@ function M.lookup(source, on_ready, opts)
     dpi = dpi,
     cell_width = cell_width,
     cell_height = cell_height,
+    scale = scale,
     inline = opts.inline == true,
   })
   if not flush_scheduled then

@@ -61,7 +61,7 @@ local M = {}
 
 ---@class LatexConfig
 ---@field enabled boolean Render LaTeX outputs and markdown math as images (needs latex, dvisvgm, rsvg-convert and image support) (default: true)
----@field scale number Size of rendered math relative to the terminal font (default: 1)
+---@field scale number Size of rendered math relative to the terminal font (default: 1.15)
 
 ---@class FoldingConfig
 ---@field hide_output boolean Include end marker in fold to hide output (default: false)
@@ -192,7 +192,8 @@ M.defaults = {
 	},
 	latex = {
 		enabled = true, -- Render LaTeX outputs and markdown math as images (needs latex, dvisvgm, rsvg-convert and image support)
-		scale = 1, -- Size of rendered math relative to the terminal font
+		-- LaTeX's font has a smaller x-height than monospace fonts: 1.15 matches them
+		scale = 1.15, -- Size of rendered math relative to the terminal font
 	},
 	inspector = {
 		close = { "q", "<Esc>" }, -- Keys to close inspector window

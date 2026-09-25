@@ -310,7 +310,7 @@ require("ipynb").setup({
   },
   latex = {
     enabled = true,    -- Render LaTeX outputs and markdown math as images (needs latex, dvisvgm, rsvg-convert and image support)
-    scale = 1,         -- Size of rendered math relative to the terminal font
+    scale = 1.15,      -- Size of rendered math relative to the terminal font
   },
   inspector = {
     -- Keymaps while in cell variable inspector float window
