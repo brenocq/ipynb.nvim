@@ -132,6 +132,30 @@ h.run_test('inline_math_is_exactly_one_row_tall', function()
     local plain = sources[1]
     h.assert_true(latex.lookup(plain, function() end, { inline = true }) ~= render_all({ plain })[plain].path,
       'Inline and display renders are cached apart')
+
+    -- A larger scale enlarges inline math too, and it stays one row tall.
+    -- (Math that fills its row, like x^2, is shrunk back to fit it.)
+    local function inline_size(source)
+      local rendered = false
+      if not latex.lookup(source, function()
+        rendered = true
+      end, { inline = true }) then
+        assert(vim.wait(20000, function()
+          return rendered
+        end, 10), 'Render should finish')
+      end
+      return png_size(latex.lookup(source, function() end, { inline = true }))
+    end
+    local scale = config.get().latex.scale
+    config.get().latex.scale = 1
+    local base_ok, base_width = pcall(inline_size, '$\\alpha + \\beta$')
+    config.get().latex.scale = 2
+    local scaled_ok, scaled_width, scaled_height = pcall(inline_size, '$\\alpha + \\beta$')
+    config.get().latex.scale = scale
+    assert(base_ok, base_width)
+    assert(scaled_ok, scaled_width)
+    h.assert_eq(scaled_height, 32, 'Scaled inline math should still be one row')
+    h.assert_true(scaled_width > base_width, 'Scale should enlarge inline math')
   end, debug.traceback)
   images.cell_size = cell_size
   assert(ok, err)
@@ -173,19 +197,20 @@ h.run_test('color_and_scale_are_part_of_the_image', function()
   local _, base_height = png_size(base)
 
   local math_hl = vim.api.nvim_get_hl(0, { name = 'IpynbMath' })
+  local scale = config.get().latex.scale
   local ok, err = xpcall(function()
     vim.api.nvim_set_hl(0, 'IpynbMath', { fg = '#ff0000' })
     local red = render_all({ source })[source].path
     h.assert_true(red ~= nil and red ~= base, 'A new color should render a new image')
     vim.api.nvim_set_hl(0, 'IpynbMath', math_hl)
 
-    config.get().latex.scale = 2
+    config.get().latex.scale = scale * 2
     local big = render_all({ source })[source].path
     local _, big_height = png_size(big)
     h.assert_true(big_height > base_height * 1.5, 'Scale should enlarge the image')
   end, debug.traceback)
   vim.api.nvim_set_hl(0, 'IpynbMath', math_hl)
-  config.get().latex.scale = 1
+  config.get().latex.scale = scale
   assert(ok, err)
 end)
 
