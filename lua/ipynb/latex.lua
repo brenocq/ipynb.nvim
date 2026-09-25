@@ -74,6 +74,33 @@ function M.get_source(output)
   return source ~= '' and source or nil
 end
 
+-- Display environments LaTeX only allows outside math mode, but MathJax, and
+-- so Jupyter, also takes inside $$...$$ or $\displaystyle ...$
+local DISPLAY_ENVIRONMENTS = {}
+for _, name in ipairs({ 'align', 'alignat', 'eqnarray', 'equation', 'flalign', 'gather', 'multline' }) do
+  DISPLAY_ENVIRONMENTS[name] = true
+  DISPLAY_ENVIRONMENTS[name .. '*'] = true
+end
+
+---Unwrap a display environment from the math delimiters around it
+---@param source string
+---@return string
+local function unwrap_environment(source)
+  local inner = vim.trim(source)
+  for _, delimiters in ipairs({ { '^%$%$', '%$%$$' }, { '^%$', '%$$' }, { '^\\%[', '\\%]$' } }) do
+    if inner:match(delimiters[1]) and inner:match(delimiters[2]) then
+      inner = vim.trim(inner:gsub(delimiters[1], ''):gsub(delimiters[2], ''))
+      break
+    end
+  end
+  inner = vim.trim(inner:gsub('^\\displaystyle', ''))
+  local name = inner:match('^\\begin{([%a]+%*?)}')
+  if name and DISPLAY_ENVIRONMENTS[name] and inner:match('\\end{' .. vim.pesc(name) .. '}$') then
+    return inner
+  end
+  return source
+end
+
 ---Text color for rendered math, as RRGGBB
 ---@param group string Highlight group to take the color from
 ---@return string
@@ -389,6 +416,9 @@ end
 ---@return string|nil error Why rendering this source failed
 function M.lookup(source, on_ready, opts)
   opts = opts or {}
+  if not opts.inline then
+    source = unwrap_environment(source)
+  end
   local fg = foreground(opts.hl or 'IpynbMath')
   local dpi, cell_width, cell_height = geometry()
   local parts = { TEMPLATE_VERSION, fg, dpi, cell_width, cell_height, source }
