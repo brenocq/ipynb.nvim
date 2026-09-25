@@ -12,7 +12,7 @@ local M = {}
 M.tools = { 'latex', 'dvisvgm', 'rsvg-convert' }
 
 -- Part of every cache key: bump it when the document or rasterization changes.
-local TEMPLATE_VERSION = '2'
+local TEMPLATE_VERSION = '3'
 
 -- showonlyrefs keeps amsmath from numbering every align/equation line, which
 -- Jupyter's MathJax does not do either.
@@ -124,21 +124,41 @@ local function run(cmd, dir, on_done)
   end
 end
 
----First error LaTeX reported in the build directory's log
+---Errors LaTeX reported in the build directory's log. With -file-line-error
+---each carries the doc.tex line it was reported at, except errors hit at the
+---end of the file.
 ---@param dir string
----@return string
-local function latex_error(dir)
+---@return { line: number|nil, message: string }[]
+local function latex_errors(dir)
+  local errors = {}
   local log = dir .. '/doc.log'
-  if vim.fn.filereadable(log) == 0 then
-    return 'latex failed'
-  end
-  for _, line in ipairs(vim.fn.readfile(log)) do
-    local message = line:match('^! (.+)')
-    if message then
-      return (message:gsub('%s*%.$', ''))
+  if vim.fn.filereadable(log) == 1 then
+    for _, text in ipairs(vim.fn.readfile(log)) do
+      local line, message = text:match('^[./]*doc%.tex:(%d+): (.+)')
+      message = message or text:match('^! (.+)')
+      if message then
+        table.insert(errors, { line = tonumber(line), message = (message:gsub('%s*%.$', '')) })
+      end
     end
   end
-  return 'latex failed'
+  return errors
+end
+
+---Whether a source's braces balance. An open group swallows every formula
+---after it, and LaTeX then reports the error far from its cause.
+---@param source string
+---@return boolean
+local function balanced(source)
+  local depth = 0
+  for backslashes, brace in source:gmatch('(\\*)([{}])') do
+    if #backslashes % 2 == 0 then
+      depth = depth + (brace == '{' and 1 or -1)
+      if depth < 0 then
+        return false
+      end
+    end
+  end
+  return depth == 0
 end
 
 ---Report the outcome of one render to everyone waiting on it
@@ -176,6 +196,8 @@ local function rasterize(item, svg, on_done)
   end
   local width = width_pt * resolution / 72
   local canvas_width = math.max(1, math.ceil(width / item.cell_width - 1e-6)) * item.cell_width
+  -- Inline math is centered in its cells, so the padding splits around it.
+  local left = item.inline and (canvas_width - width) / 2 or 0
   local canvas_height = item.inline and item.cell_height
     or math.max(1, math.ceil(height / item.cell_height - 1e-6)) * item.cell_height
   local dpi = ('%.3f'):format(resolution)
@@ -185,7 +207,7 @@ local function rasterize(item, svg, on_done)
   run({
     'rsvg-convert', '--dpi-x=' .. dpi, '--dpi-y=' .. dpi,
     ('--page-width=%dpx'):format(canvas_width), ('--page-height=%dpx'):format(canvas_height),
-    ('--top=%.3fpx'):format((canvas_height - height) / 2),
+    ('--left=%.3fpx'):format(left), ('--top=%.3fpx'):format((canvas_height - height) / 2),
     '-o', png, svg,
   }, vim.fs.dirname(svg), function(ok)
     -- Only complete images reach the cache, where they are trusted as is.
@@ -195,29 +217,64 @@ local function rasterize(item, svg, on_done)
 end
 
 ---Render items sharing a color and geometry as one document, one page each.
----A failing batch is split in half and retried, so one broken formula costs a
----few extra runs instead of taking every other formula down with it.
+---latex runs through errors, and each one is blamed on the formula at its
+---line, so the rest render in one more run. Anything else that fails the batch
+---splits it in half, down to single formulas.
 ---@param items table[]
 ---@param on_done fun()
 local function render(items, on_done)
+  -- Formulas with unbalanced braces could derail the others: typeset alone.
+  if #items > 1 then
+    local groups, shared = {}, {}
+    for _, item in ipairs(items) do
+      if balanced(item.source) then
+        table.insert(shared, item)
+      else
+        table.insert(groups, { item })
+      end
+    end
+    if #groups > 0 then
+      if #shared > 0 then
+        table.insert(groups, shared)
+      end
+      local pending = #groups
+      for _, group in ipairs(groups) do
+        render(group, function()
+          pending = pending - 1
+          if pending == 0 then
+            on_done()
+          end
+        end)
+      end
+      return
+    end
+  end
+
   local dir = cache_dir() .. '/build-' .. vim.uv.hrtime()
   vim.fn.mkdir(dir, 'p')
 
+  -- doc.tex, remembering which lines each formula occupies
   local color = ('\\color[HTML]{%s}'):format(items[1].fg)
-  local doc
-  if items[1].inline then
-    doc = { INLINE_PREAMBLE }
-    for _, item in ipairs(items) do
-      table.insert(doc, ('\\begin{preview}%s\\strut %s\\end{preview}'):format(color, item.source))
-    end
-  else
-    doc = { PREAMBLE, color }
-    for _, item in ipairs(items) do
-      vim.list_extend(doc, { item.source, '\\clearpage' })
-    end
+  local lines = vim.split(items[1].inline and INLINE_PREAMBLE or PREAMBLE, '\n')
+  if not items[1].inline then
+    table.insert(lines, color)
   end
-  table.insert(doc, '\\end{document}')
-  vim.fn.writefile(vim.split(table.concat(doc, '\n'), '\n'), dir .. '/doc.tex')
+  local ranges = {}
+  for i, item in ipairs(items) do
+    local body = vim.split(item.source, '\n')
+    if item.inline then
+      body[1] = '\\begin{preview}' .. color .. '\\strut ' .. body[1]
+      body[#body] = body[#body] .. '\\end{preview}'
+    else
+      -- A group keeps what one formula sets from reaching the next.
+      body[1] = '\\begingroup ' .. body[1]
+      body[#body] = body[#body] .. '\\endgroup\\clearpage'
+    end
+    ranges[i] = { #lines + 1, #lines + #body }
+    vim.list_extend(lines, body)
+  end
+  table.insert(lines, '\\end{document}')
+  vim.fn.writefile(lines, dir .. '/doc.tex')
 
   ---The batch as a whole failed: report why for a single source, or retry halves
   ---@param err string
@@ -233,9 +290,34 @@ local function render(items, on_done)
     end)
   end
 
-  run({ 'latex', '-no-shell-escape', '-halt-on-error', '-interaction=batchmode', 'doc.tex' }, dir, function(ok)
+  local latex = { 'latex', '-no-shell-escape', '-file-line-error', '-interaction=nonstopmode', 'doc.tex' }
+  run(latex, dir, function(ok)
     if not ok then
-      return fail(latex_error(dir))
+      local errors = latex_errors(dir)
+      local blamed = {}
+      for _, err in ipairs(errors) do
+        for i, range in ipairs(ranges) do
+          if err.line and err.line >= range[1] and err.line <= range[2] then
+            blamed[i] = blamed[i] or err.message
+          end
+        end
+      end
+      if #items == 1 or not next(blamed) then
+        return fail(errors[1] and errors[1].message or 'latex failed')
+      end
+      vim.fn.delete(dir, 'rf')
+      local rest = {}
+      for i, item in ipairs(items) do
+        if blamed[i] then
+          finish(item, blamed[i])
+        else
+          table.insert(rest, item)
+        end
+      end
+      if #rest == 0 then
+        return on_done()
+      end
+      return render(rest, on_done)
     end
     -- Display math is cropped to its ink; inline math keeps its strut box.
     local bbox = items[1].inline and '--bbox=preview' or '--exact-bbox'
