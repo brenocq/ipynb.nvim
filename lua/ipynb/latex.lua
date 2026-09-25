@@ -128,11 +128,26 @@ local function geometry()
 end
 
 ---@return string
+local pruned = false
+
 local function cache_dir()
   local dir = require('ipynb.images').get_cache_dir() .. '/latex'
   vim.fn.mkdir(dir, 'p')
+  if not pruned then
+    pruned = true
+    -- A render cut short by nvim exiting leaves its build directory behind.
+    -- Renders take seconds, so anything this old is no longer in use.
+    for _, build in ipairs(vim.fn.glob(dir .. '/build-*', false, true)) do
+      local stat = vim.uv.fs_stat(build)
+      if stat and os.time() - stat.mtime.sec > 600 then
+        vim.fn.delete(build, 'rf')
+      end
+    end
+  end
   return dir
 end
+
+local builds = 0
 
 ---Run a command in dir and report whether it succeeded
 ---@param cmd string[]
@@ -278,7 +293,9 @@ local function render(items, on_done)
     end
   end
 
-  local dir = cache_dir() .. '/build-' .. vim.uv.hrtime()
+  -- The pid keeps concurrent nvim instances sharing the cache apart.
+  builds = builds + 1
+  local dir = ('%s/build-%d-%d'):format(cache_dir(), vim.fn.getpid(), builds)
   vim.fn.mkdir(dir, 'p')
 
   -- doc.tex, remembering which lines each formula occupies
