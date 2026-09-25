@@ -283,8 +283,8 @@ local function latex_virt_lines(state, cell, output, on_ready)
     return nil
   end
   local path, err = latex_mod.lookup(source, on_ready)
-  if path then
-    return (images_mod.get_file_virt_lines(state, cell, path))
+  if path and cell.id then
+    return (images_mod.get_file_virt_lines(state, cell.id, path))
   end
   if err then
     -- text/plain of a LaTeX-only object is just its repr (<...Math object>),

@@ -300,7 +300,7 @@ end
 
 ---Generate virt_lines entries showing an image file
 ---@param state NotebookState
----@param cell_id string Cell the image belongs to
+---@param cell_id string Key the image is tracked under for cleanup (usually a cell ID)
 ---@param path string Path to the image file
 ---@param owned boolean Whether the file belongs to this cell and is deleted with its images
 ---@return table[]|nil virt_line_entries Array of virt_line entries, or nil if failed
@@ -473,15 +473,15 @@ end
 ---Generate virt_lines entries for an image file that outlives the cell's
 ---images, such as a cache entry shared between cells
 ---@param state NotebookState
----@param cell table Cell object
+---@param owner string Key the image is tracked under, cleared with clear_images
 ---@param path string Path to the image file
 ---@return table[]|nil virt_line_entries Array of virt_line entries, or nil if failed
 ---@return number height Height of the image in terminal rows
-function M.get_file_virt_lines(state, cell, path)
-	if not M.supports_placeholders() or not cell.id then
+function M.get_file_virt_lines(state, owner, path)
+	if not M.supports_placeholders() then
 		return nil, 0
 	end
-	return file_virt_lines(state, cell.id, path, false)
+	return file_virt_lines(state, owner, path, false)
 end
 
 ---Clear images for a cell

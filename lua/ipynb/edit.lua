@@ -449,6 +449,10 @@ function M.open(state, mode)
   }
   refresh_edit_window(state)
 
+  -- The cell shows its source while edited: its lines get rewritten on every
+  -- change, and the math is rendered again when the float closes.
+  require('ipynb.markdown_math').clear_cell(state, cell_idx)
+
   -- Re-render visuals to show active border (must be after edit_state is set)
   local visuals = require('ipynb.visuals')
   visuals.render_all(state)
@@ -1065,6 +1069,7 @@ local function global_undo_redo(state, cmd)
 
     local output_mod = require('ipynb.output')
     output_mod.render_all(state)
+    require('ipynb.markdown_math').render_all(state)
 
     local images_mod = require('ipynb.images')
     if images_mod.is_available() then
@@ -1127,6 +1132,14 @@ function M.close(state)
 
   local visuals = require('ipynb.visuals')
   visuals.render_all(state)
+
+  -- The edited cell showed its source: render its math again.
+  for idx, other in ipairs(state.cells) do
+    if other.id == edit.cell_id then
+      require('ipynb.markdown_math').render_cell(state, idx)
+      break
+    end
+  end
 
   -- Refresh diagnostics on facade
   require('ipynb.lsp').refresh_facade_diagnostics(state)

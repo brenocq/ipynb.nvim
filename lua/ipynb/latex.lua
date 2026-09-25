@@ -61,9 +61,10 @@ function M.get_source(output)
 end
 
 ---Text color for rendered math, as RRGGBB
+---@param group string Highlight group to take the color from
 ---@return string
-local function foreground()
-  for _, name in ipairs({ 'IpynbMath', 'Normal' }) do
+local function foreground(group)
+  for _, name in ipairs({ group, 'Normal' }) do
     local hl = vim.api.nvim_get_hl(0, { name = name, link = false })
     if hl.fg then
       return string.format('%06X', hl.fg)
@@ -217,13 +218,17 @@ local function render(items, on_done)
         return fail('the LaTeX does not fit on one page')
       end
 
-      local pending = #items
+      -- Report the batch at once, so waiting cells render once with all of it.
+      local pending, errors = #items, {}
       for i, item in ipairs(items) do
         rasterize(item, pages[i], function(err)
-          finish(item, err)
+          errors[i] = err
           pending = pending - 1
           if pending == 0 then
             vim.fn.delete(dir, 'rf')
+            for j, done_item in ipairs(items) do
+              finish(done_item, errors[j])
+            end
             on_done()
           end
         end)
@@ -252,10 +257,11 @@ end
 ---Sources requested in the same tick are rendered together.
 ---@param source string LaTeX source, as found in a text/latex output
 ---@param on_ready fun() Called when a render started for this source finishes
+---@param hl string|nil Highlight group for the math color (default: IpynbMath)
 ---@return string|nil path PNG file, when the source is already rendered
 ---@return string|nil error Why rendering this source failed
-function M.lookup(source, on_ready)
-  local fg = foreground()
+function M.lookup(source, on_ready, hl)
+  local fg = foreground(hl or 'IpynbMath')
   local dpi, cell_width, cell_height = geometry()
   local key = vim.fn.sha256(table.concat({ TEMPLATE_VERSION, fg, dpi, cell_width, cell_height, source }, '\0'))
   if failed[key] then
