@@ -266,6 +266,45 @@ function M.build_output_text(cell)
   return lines
 end
 
+---Get lines showing an output's text/latex entry: the rendered image, or the
+---source and error when it fails to compile. Returns nil when the output has
+---no LaTeX, it cannot be shown as an image, or its render is still running;
+---the caller then falls back to text/plain.
+---@param state NotebookState
+---@param cell table Cell object
+---@param output table Output object
+---@param on_ready fun() Called when a render started for this output finishes
+---@return table[]|nil virt_lines
+local function latex_virt_lines(state, cell, output, on_ready)
+  local latex_mod = require('ipynb.latex')
+  local images_mod = require('ipynb.images')
+  local source = latex_mod.get_source(output)
+  if not source or not latex_mod.is_available() or not images_mod.supports_placeholders() then
+    return nil
+  end
+  local path, err = latex_mod.lookup(source, on_ready)
+  if path and cell.id then
+    return (images_mod.get_file_virt_lines(state, cell.id, path, on_ready))
+  end
+  if err then
+    -- text/plain of a LaTeX-only object is just its repr (<...Math object>),
+    -- so show what failed and why instead.
+    local lines = {}
+    add_text_plain_lines(lines, source, output.output_type == 'execute_result' and 'Out: ' or nil, 'IpynbOutput')
+    table.insert(lines, { { 'LaTeX error: ' .. err, 'IpynbOutputError' } })
+    return lines
+  end
+  return nil
+end
+
+-- Cells whose outputs are being rendered. Showing an image waits for it with
+-- vim.wait, which runs scheduled callbacks, so a cell can be asked to render
+-- again while it renders: note that, and render once more afterwards instead
+-- of interleaving the two.
+local rendering = setmetatable({}, { __mode = 'k' }) ---@type table<Cell, 'busy'|'again'>
+
+local render_outputs
+
 ---Render outputs for a cell as virtual lines with true text/image interleaving
 ---All outputs (text and images) are combined into a single extmark's virt_lines
 ---This guarantees correct ordering: text1 → img1 → text2 → img2 → etc.
@@ -273,6 +312,36 @@ end
 ---@param cell_idx number
 ---@param skip_image_render boolean|nil Unused, kept for API compatibility
 function M.render_outputs(state, cell_idx, skip_image_render)
+  local cell = state.cells[cell_idx]
+  if not cell then
+    return
+  end
+  if rendering[cell] then
+    rendering[cell] = 'again'
+    return
+  end
+  rendering[cell] = 'busy'
+  local ok, err = pcall(render_outputs, state, cell_idx)
+  local again = rendering[cell] == 'again'
+  rendering[cell] = nil
+  if again then
+    vim.schedule(function()
+      for idx, other in ipairs(state.cells) do
+        if other == cell then
+          return M.render_outputs(state, idx)
+        end
+      end
+    end)
+  end
+  if not ok then
+    error(err, 0)
+  end
+end
+
+---Render one cell's outputs (see M.render_outputs)
+---@param state NotebookState
+---@param cell_idx number
+render_outputs = function(state, cell_idx)
   local cell = state.cells[cell_idx]
   if not cell.outputs or #cell.outputs == 0 then
     return
@@ -297,6 +366,27 @@ function M.render_outputs(state, cell_idx, skip_image_render)
   local virt_lines = {}
   local image_index = 0
 
+  -- LaTeX images render in the background: show text/plain until they are
+  -- ready, then render this cell again, once however many were pending.
+  local rerender_scheduled = false
+  local function rerender()
+    if rerender_scheduled then
+      return
+    end
+    rerender_scheduled = true
+    vim.schedule(function()
+      if not vim.api.nvim_buf_is_valid(state.facade_buf) then
+        return
+      end
+      for idx, other in ipairs(state.cells) do
+        if other.id == cell.id then
+          M.render_outputs(state, idx)
+          return
+        end
+      end
+    end)
+  end
+
   -- Output separator
   table.insert(virt_lines, { { '┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄', 'IpynbBorder' } })
 
@@ -320,7 +410,7 @@ function M.render_outputs(state, cell_idx, skip_image_render)
       table.insert(virt_lines, { { '[Image - placeholders not supported]', 'Comment' } })
     else
       -- Add text lines to virt_lines array
-      local rendered = M.render_output(output)
+      local rendered = latex_virt_lines(state, cell, output, rerender) or M.render_output(output)
       for _, line in ipairs(rendered) do
         table.insert(virt_lines, line)
       end
