@@ -140,6 +140,28 @@ def test_kernel_start():
         bridge.stop()
 
 
+def test_kernel_uses_ipc():
+    """The kernel runs over Unix sockets, so ipykernel has no unencrypted TCP port to warn about."""
+    if sys.platform == "win32":
+        print("SKIP: ZeroMQ has no IPC transport on Windows")
+        return
+    bridge = KernelBridgeTest()
+    try:
+        bridge.start()
+        bridge.read_message()  # consume ready
+
+        bridge.send({"action": "start", "kernel_name": "python3"})
+        msg = bridge.wait_for_message("kernel_started", timeout=30)
+        assert msg is not None, "Kernel did not start"
+        assert msg.get("transport") == "ipc", f"Expected the ipc transport, got {msg.get('transport')}"
+    finally:
+        proc = bridge.proc
+        bridge.stop()
+    stderr = proc.stderr.read() if proc else ""
+    assert "without encryption" not in stderr, "The kernel still warns about unencrypted TCP"
+    print("PASS: Kernel started over IPC, no TCP warning")
+
+
 def test_code_execution():
     """Test executing code in the kernel."""
     bridge = KernelBridgeTest()
@@ -471,6 +493,7 @@ def run_all_tests():
         test_bridge_ready,
         test_ping_pong,
         test_kernel_start,
+        test_kernel_uses_ipc,
         test_code_execution,
         test_execution_count,
         test_execute_result,
