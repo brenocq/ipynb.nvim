@@ -9,6 +9,7 @@ Uses jupyter_client to manage kernel connections.
 import json
 import sys
 import threading
+import time
 import queue
 import uuid
 from typing import Optional, Dict, Any
@@ -26,6 +27,15 @@ except ImportError:
     sys.exit(1)
 
 
+# Transports to start a kernel over, in order of preference. IPC (Unix domain sockets
+# in Jupyter's runtime directory) keeps the kernel off the network stack: only this
+# user can open the sockets, and ipykernel has no unencrypted TCP port to warn about.
+# ZeroMQ has no IPC transport on Windows, and a socket path can exceed the OS limit
+# (about 104-108 bytes) under a long runtime directory, so localhost TCP stays as the
+# fallback.
+TRANSPORTS = ("tcp",) if sys.platform == "win32" else ("ipc", "tcp")
+
+
 class KernelBridge:
     """Manages a Jupyter kernel connection and handles message passing."""
 
@@ -39,6 +49,9 @@ class KernelBridge:
         self.iopub_thread: Optional[threading.Thread] = None
         self.stdin_thread: Optional[threading.Thread] = None
         self.pending_input_requests: Dict[str, Dict[str, Any]] = {}
+        # msg_ids of requests the bridge sends for itself (the kernel_info polls after a
+        # restart); their IOPub traffic is not the user's and is not forwarded.
+        self.internal_msg_ids: set = set()
         self.running = True
         self.output_queue = queue.Queue()
 
@@ -50,13 +63,7 @@ class KernelBridge:
         """Start a new Jupyter kernel."""
         try:
             self.kernel_name = kernel_name
-            self.kernel_manager = jupyter_client.KernelManager(kernel_name=kernel_name)
-            self.kernel_manager.start_kernel()
-            self.kernel_client = self.kernel_manager.client()
-            self.kernel_client.start_channels()
-
-            # Wait for kernel to be ready
-            self.kernel_client.wait_for_ready(timeout=30)
+            self._launch(kernel_name)
 
             # Start iopub listener thread
             self._start_iopub_listener()
@@ -74,7 +81,8 @@ class KernelBridge:
                 "type": "kernel_started",
                 "kernel_name": kernel_name,
                 "kernel_id": self.kernel_manager.kernel_id or "unknown",
-                "language": language
+                "language": language,
+                "transport": self.kernel_manager.transport
             })
             return True
         except Exception as e:
@@ -83,6 +91,30 @@ class KernelBridge:
                 "error": f"Failed to start kernel: {str(e)}"
             })
             return False
+
+    def _launch(self, kernel_name: str):
+        """Start a kernel and wait until it answers, over the first transport that works."""
+        errors = []
+        for transport in TRANSPORTS:
+            manager = jupyter_client.KernelManager(kernel_name=kernel_name, transport=transport)
+            client = None
+            try:
+                manager.start_kernel()
+                client = manager.client()
+                client.start_channels()
+                client.wait_for_ready(timeout=30)
+            except Exception as e:
+                errors.append(f"{transport}: {e}")
+                try:
+                    if client is not None:
+                        client.stop_channels()
+                    manager.shutdown_kernel(now=True)
+                except Exception:
+                    pass
+                continue
+            self.kernel_manager, self.kernel_client = manager, client
+            return
+        raise RuntimeError("; ".join(errors))
 
     def connect_to_kernel(self, connection_file: str) -> bool:
         """Connect to an existing kernel via connection file."""
@@ -169,6 +201,13 @@ class KernelBridge:
         content = msg.get("content", {})
         parent_header = msg.get("parent_header", {})
         msg_id = parent_header.get("msg_id", "")
+
+        if msg_id in self.internal_msg_ids:
+            # The busy/idle pair of the bridge's own kernel_info polls: forwarding it
+            # would tell Neovim the kernel went idle in the middle of a user's cell.
+            if msg_type == "status" and content.get("execution_state") == "idle":
+                self.internal_msg_ids.discard(msg_id)
+            return
 
         # Find the cell this message belongs to
         exec_info = self.pending_executions.get(msg_id, {})
@@ -354,12 +393,30 @@ class KernelBridge:
                     "error": f"Failed to interrupt: {str(e)}"
                 })
 
+    def _wait_until_ready(self, timeout: float = 30.0):
+        """Wait for the kernel to answer kernel_info, reading the shell channel only.
+
+        jupyter_client's wait_for_ready also drains IOPub, which the listener thread
+        reads at the same time. ZeroMQ sockets are not thread-safe: over IPC the two
+        readers interleave frames fast enough to break message signatures.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.internal_msg_ids.add(self.kernel_client.kernel_info())
+            try:
+                reply = self.kernel_client.get_shell_msg(timeout=1)
+            except queue.Empty:
+                continue
+            if reply.get("msg_type") == "kernel_info_reply":
+                return
+        raise RuntimeError(f"kernel did not answer kernel_info within {timeout:.0f} s")
+
     def restart(self):
         """Restart the kernel."""
         if self.kernel_manager:
             try:
                 self.kernel_manager.restart_kernel()
-                self.kernel_client.wait_for_ready(timeout=30)
+                self._wait_until_ready(timeout=30)
                 self.execution_count = 0
                 self.pending_executions.clear()
                 self.pending_input_requests.clear()
