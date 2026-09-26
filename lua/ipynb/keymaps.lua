@@ -27,8 +27,11 @@ local function move_cursor_to_cell(state, cell_idx)
   vim.api.nvim_win_set_cursor(0, { start_line + CONTENT_LINE_OFFSET, 0 })
 end
 
----Register keymaps with which-key for discoverability (if available)
-local function register_which_key()
+---Register keymaps with which-key for discoverability (if available).
+---The specs are buffer-local, like the keymaps they describe: registered without
+---`buffer`, which-key would show the notebook group under <leader>k in every buffer.
+---@param buf integer
+local function register_which_key(buf)
   local wk_ok, wk = pcall(require, 'which-key')
   if not wk_ok then
     return
@@ -39,6 +42,7 @@ local function register_which_key()
 
   -- Register with consistent naming (Category + action) for easy scanning
   wk.add({
+    buffer = buf, -- inherited by every spec below
     { "<leader>k", group = "notebook", icon = "󰠮" },
     -- Cell operations
     { km.add_cell_above, desc = "Cell add above", icon = "󰐕" },
@@ -292,7 +296,7 @@ function M.setup_facade_keymaps(state)
   })
 
   -- Register with which-key for discoverability (if available)
-  register_which_key()
+  register_which_key(buf)
 end
 
 ---Cut current cell to register
