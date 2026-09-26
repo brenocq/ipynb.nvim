@@ -377,6 +377,7 @@ local total_failed = 0
 local tests = {
   join(root, 'tests/test_cells.lua'),
   join(root, 'tests/test_modified.lua'),
+  join(root, 'tests/test_keymaps.lua'),
   join(root, 'tests/test_undo.lua'),
   join(root, 'tests/test_output.lua'),
   join(root, 'tests/test_kernel_stdout.lua'),
