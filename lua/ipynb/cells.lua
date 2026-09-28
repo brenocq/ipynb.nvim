@@ -158,6 +158,7 @@ function M.sync_cells_from_facade(state)
         namespace_state = cell.namespace_state,
         execution_state = cell.execution_state,
         stream_state = cell._stream_state,
+        outputs_unsaved = cell.outputs_unsaved,
       }
     end
   end
@@ -179,6 +180,7 @@ function M.sync_cells_from_facade(state)
         new_cell.namespace_state = old_cell.namespace_state
         new_cell.execution_state = old_cell.execution_state
         new_cell._stream_state = old_cell._stream_state
+        new_cell.outputs_unsaved = old_cell.outputs_unsaved
         new_cell.output_extmark = old_cell.output_extmark
       end
     else
@@ -199,6 +201,7 @@ function M.sync_cells_from_facade(state)
             new_cell.namespace_state = data.namespace_state
             new_cell.execution_state = data.execution_state
             new_cell._stream_state = data.stream_state
+            new_cell.outputs_unsaved = data.outputs_unsaved
           end
           new_cell.output_extmark = old_cell.output_extmark
         end

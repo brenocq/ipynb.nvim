@@ -56,6 +56,7 @@ end
 ---@param output Output
 function M.append_output(cell, output)
   cell.outputs = cell.outputs or {}
+  cell.outputs_unsaved = true
 
   if output.output_type ~= 'stream' then
     table.insert(cell.outputs, output)
