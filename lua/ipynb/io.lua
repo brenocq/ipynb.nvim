@@ -368,7 +368,13 @@ local function reload_notebook(state, cells, metadata, cell_ids, generated_ids)
   if not vim.treesitter.highlighter.active[state.facade_buf] then
     vim.treesitter.start(state.facade_buf, 'ipynb')
   end
+  -- Like opening, reloading starts a fresh undo history: undo only restores
+  -- text, so undoing past a reload would bring back the old cells without
+  -- their outputs and metadata.
+  local undolevels = vim.bo[state.facade_buf].undolevels
+  vim.bo[state.facade_buf].undolevels = -1
   require('ipynb.facade').refresh(state)
+  vim.bo[state.facade_buf].undolevels = undolevels
 end
 
 ---Open a notebook file (or create new if doesn't exist)
