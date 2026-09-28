@@ -93,21 +93,38 @@ for _, reload in ipairs({ { name = 'edit_bang', cmd = 'edit!' }, { name = 'autor
   end)
 end
 
+-- Start a headless-nvim stand-in for the kernel bridge on the notebook, going
+-- through the production job options; only the command is substituted. The
+-- echo bridge answers each execute after delay_ms.
+local function start_echo_bridge(state, delay_ms)
+  local jobstart = vim.fn.jobstart
+  vim.fn.jobstart = function(_, opts)
+    return jobstart({
+      vim.v.progpath, '--headless', '-u', 'NONE', '-i', 'NONE',
+      '-l', tests_dir .. '/fixtures/kernel_echo_bridge.lua', tostring(delay_ms or 0),
+    }, opts)
+  end
+  local ok, started = pcall(kernel.start_bridge, state, vim.v.progpath)
+  vim.fn.jobstart = jobstart
+  assert(ok and started, 'Bridge job should start')
+  assert(vim.wait(5000, function()
+    return state.kernel.connected
+  end, 10), 'Bridge should report a started kernel')
+end
+
+local function stop_echo_bridge(state)
+  local job = state.kernel and state.kernel.job_id
+  if job then
+    -- The echo bridge exits cleanly at EOF.
+    vim.fn.chanclose(job, 'stdin')
+    vim.fn.jobwait({ job }, 2000)
+  end
+end
+
 h.run_test('kernel_output_reaches_reloaded_notebook', function()
   local state, path = open({ code_cell('c1', 'a = 1'), code_cell('c2', 'b = 2') })
-  local jobstart = vim.fn.jobstart
   local ok, err = xpcall(function()
-    -- Only substitute the command, preserving the production job options.
-    vim.fn.jobstart = function(_, opts)
-      return jobstart({
-        vim.v.progpath, '--headless', '-u', 'NONE', '-i', 'NONE',
-        '-l', tests_dir .. '/fixtures/kernel_echo_bridge.lua',
-      }, opts)
-    end
-    assert(kernel.start_bridge(state, vim.v.progpath), 'Bridge job should start')
-    assert(vim.wait(5000, function()
-      return state.kernel.connected
-    end, 10), 'Bridge should report a started kernel')
+    start_echo_bridge(state)
 
     -- A cell inserted above shifts the executed cell to a new index.
     change_on_disk(path, { code_cell('c0', 'z = 0'), code_cell('c1', 'a = 1'), code_cell('c2', 'b = 2') })
@@ -121,16 +138,34 @@ h.run_test('kernel_output_reaches_reloaded_notebook', function()
     end, 10), 'Output should arrive in the reloaded notebook')
     h.assert_eq(output_text(reloaded.cells[3]), 'ran b = 2\n')
   end, debug.traceback)
-
-  vim.fn.jobstart = jobstart
-  local job = state.kernel and state.kernel.job_id
-  if job then
-    -- The echo bridge exits cleanly at EOF.
-    vim.fn.chanclose(job, 'stdin')
-    vim.fn.jobwait({ job }, 2000)
-  end
+  stop_echo_bridge(state)
   assert(ok, err)
 end)
+
+-- A notebook saved without cell IDs (nbformat < 4.5) gets new random IDs on
+-- every read, so the reload must carry the old ones over to keep routing.
+for _, ids in ipairs({ { name = 'with_ids', c0 = 'c0', c1 = 'c1', c2 = 'c2' }, { name = 'without_ids' } }) do
+  h.run_test('output_in_flight_during_reload_reaches_its_cell_' .. ids.name, function()
+    local state, path = open({ code_cell(ids.c1, 'a = 1'), code_cell(ids.c2, 'b = 2') })
+    local ok, err = xpcall(function()
+      start_echo_bridge(state, 300)
+      h.assert_true(kernel.execute(state, 2), 'Execute should reach the kernel')
+
+      -- Reload while the output is on its way; the executed cell moves down.
+      change_on_disk(path, { code_cell(ids.c0, 'z = 0'), code_cell(ids.c1, 'a = 1'), code_cell(ids.c2, 'b = 2') })
+      vim.cmd('edit!')
+      h.assert_eq(#state.cells[3].outputs, 0, 'Output should still be in flight')
+
+      h.assert_true(vim.wait(5000, function()
+        return #state.cells[3].outputs > 0
+      end, 10), 'In-flight output should reach the moved cell')
+      h.assert_eq(output_text(state.cells[3]), 'ran b = 2\n')
+      h.assert_eq(#state.cells[1].outputs + #state.cells[2].outputs, 0, 'No other cell should get the output')
+    end, debug.traceback)
+    stop_echo_bridge(state)
+    assert(ok, err)
+  end)
+end
 
 h.run_test('reload_keeps_only_unsaved_outputs', function()
   local state, path = open({ code_cell('c1', 'a = 1'), code_cell('c2', 'b = 2', 'saved\n'), code_cell('c3', 'c = 3') })
@@ -155,6 +190,79 @@ h.run_test('reload_keeps_only_unsaved_outputs', function()
   change_on_disk(path, { code_cell('c1', 'a = 1', 'rerun elsewhere\n'), code_cell('c2', 'b = 2'), code_cell('c3', 'c = 33') })
   vim.cmd('checktime')
   h.assert_eq(output_text(state.cells[1]), 'rerun elsewhere\n', 'Saved outputs should not override the disk')
+end)
+
+h.run_test('reload_keeps_unsaved_outputs_without_cell_ids', function()
+  local state, path = open({ code_cell(nil, 'a = 1'), code_cell(nil, 'b = 2') })
+  output.clear_outputs(state, 1)
+  output.append_output(state.cells[1], { output_type = 'stream', name = 'stdout', text = 'ran\n' })
+  local id = state.cells[1].id
+
+  change_on_disk(path, { code_cell(nil, 'a = 1'), code_cell(nil, 'b = 22') })
+  vim.cmd('checktime')
+
+  h.assert_eq(state.cells[1].id, id, 'An unchanged cell should keep its in-memory ID')
+  h.assert_eq(output_text(state.cells[1]), 'ran\n', 'Unsaved output of unchanged code should survive')
+  h.assert_eq(state.cells[2].source, 'b = 22')
+end)
+
+h.run_test('unsaved_outputs_survive_editing_another_cell', function()
+  local state, path = open({ code_cell('c1', 'a = 1'), code_cell('c2', 'b = 2') })
+  output.clear_outputs(state, 1)
+  output.append_output(state.cells[1], { output_type = 'stream', name = 'stdout', text = 'ran\n' })
+  -- Editing a cell rebuilds every cell from the facade text.
+  h.enter_cell(2)
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'b = 3' })
+  h.exit_cell()
+
+  change_on_disk(path, { code_cell('c1', 'a = 1'), code_cell('c2', 'b = 4') })
+  vim.cmd('edit!')
+  h.assert_eq(output_text(state.cells[1]), 'ran\n', 'Unsaved output should survive the rebuild and the reload')
+end)
+
+h.run_test('reload_starts_a_fresh_undo_history', function()
+  local state, path = open({ code_cell('c1', 'a = 1'), code_cell('c2', 'b = 2') })
+  change_on_disk(path, { code_cell('c1', 'a = 1'), code_cell('c2', 'b = 22'), code_cell('c3', 'c = 3') })
+  vim.cmd('checktime')
+
+  require('ipynb.edit').global_undo(state)
+  h.assert_eq(sources(state), 'c1:a = 1 c2:b = 22 c3:c = 3', 'Undo should not reach past the reload')
+  h.assert_false(vim.bo[state.facade_buf].modified, 'Nothing to undo leaves the notebook unmodified')
+
+  -- Edits made after the reload are still undoable.
+  h.enter_cell(3)
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'c = 4' })
+  h.exit_cell()
+  require('ipynb.edit').global_undo(state)
+  h.assert_eq(sources(state), 'c1:a = 1 c2:b = 22 c3:c = 3', 'An edit after the reload should undo')
+end)
+
+-- With 'nohidden', leaving the notebook unloads its buffer without deleting
+-- it: the notebook and its kernel must survive, and output that arrives in the
+-- meantime must show once the notebook is entered again.
+h.run_test('output_while_unloaded_shows_on_return', function()
+  local state = open({ code_cell('c1', 'a = 1') })
+  local buf = state.facade_buf
+  local hidden = vim.o.hidden
+  local ok, err = xpcall(function()
+    vim.o.hidden = false
+    start_echo_bridge(state, 300)
+    h.assert_true(kernel.execute(state, 1), 'Execute should reach the kernel')
+    vim.cmd('enew')
+    h.assert_false(vim.api.nvim_buf_is_loaded(buf), 'Leaving should unload the notebook buffer')
+    h.assert_true(state_mod.get(buf) == state, 'Unloading should keep the notebook state')
+    h.assert_true(vim.wait(5000, function()
+      return #state.cells[1].outputs > 0
+    end, 10), 'Output should arrive while unloaded')
+
+    vim.cmd('buffer ' .. buf)
+    h.assert_true(state_mod.get(buf) == state, 'Returning should reuse the notebook state')
+    h.assert_true(state.kernel.connected, 'The kernel should still be attached')
+    h.assert_eq(output_text(state.cells[1]), 'ran a = 1\n')
+  end, debug.traceback)
+  vim.o.hidden = hidden
+  stop_echo_bridge(state)
+  assert(ok, err)
 end)
 
 h.run_test('reload_closes_open_edit_float', function()
