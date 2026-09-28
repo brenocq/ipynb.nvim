@@ -384,6 +384,7 @@ local tests = {
   join(root, 'tests/test_kernel_stderr.lua'),
   join(root, 'tests/test_latex.lua'),
   join(root, 'tests/test_markdown_math.lua'),
+  join(root, 'tests/test_reload.lua'),
   join(root, 'tests/test_io.lua'),
   join(root, 'tests/test_shadow.lua'),
   join(root, 'tests/test_lsp.lua'),

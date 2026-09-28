@@ -67,7 +67,7 @@ function M.close_all_notebooks()
 		return #vim.lsp.get_clients() == 0
 	end, 20)
 
-	-- Delete notebook facade buffers first. Their BufUnload handlers will clean up
+	-- Delete notebook facade buffers first. Their BufDelete handlers will clean up
 	-- shadow buffers, temp files, images, and state entries.
 	for _, buf in ipairs(facade_bufs) do
 		if vim.api.nvim_buf_is_valid(buf) then

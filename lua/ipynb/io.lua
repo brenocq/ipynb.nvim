@@ -57,6 +57,7 @@ end
 ---(per JEP 62), repairing missing or duplicate IDs on read.
 ---@param path string Path to .ipynb file
 ---@return Cell[], table metadata, table<string, boolean> cell_ids
+---@return table<string, boolean> generated_ids IDs generated here, not read from the file
 function M.read_ipynb(path)
   local content = vim.fn.readfile(path)
   local json_str = table.concat(content, '\n')
@@ -69,6 +70,7 @@ function M.read_ipynb(path)
   -- Assign IDs against a live "already used" set so malformed notebooks with
   -- duplicate IDs are repaired during load. The first valid occurrence wins.
   local existing_ids = {}
+  local generated_ids = {}
   local cells = {}
   for _, nb_cell in ipairs(notebook.cells or {}) do
     -- Source can be string or array of strings
@@ -82,6 +84,7 @@ function M.read_ipynb(path)
     local id = nb_cell.id
     if type(id) ~= 'string' or id == '' or existing_ids[id] then
       id = state_mod.generate_cell_id(existing_ids)
+      generated_ids[id] = true
     end
     existing_ids[id] = true
 
@@ -110,7 +113,7 @@ function M.read_ipynb(path)
   metadata.nbformat = notebook.nbformat or default.nbformat
   metadata.nbformat_minor = math.max(notebook.nbformat_minor or 0, 5)
 
-  return cells, metadata, existing_ids
+  return cells, metadata, existing_ids, generated_ids
 end
 
 ---Split source string into array of lines (matches nbformat/splitlines behavior)
@@ -294,20 +297,109 @@ function M.jupytext_to_cells(lines)
   return cells
 end
 
+---Replace the document of an open notebook in place.
+---The kernel's message callbacks hold the state object, so reloading must keep
+---it rather than build a new one: a fresh state would strand the kernel.
+---@param state NotebookState
+---@param cells Cell[]
+---@param metadata table
+---@param cell_ids table<string, boolean>
+---@param generated_ids table<string, boolean> IDs generated on read, not in the file
+local function reload_notebook(state, cells, metadata, cell_ids, generated_ids)
+  -- An open edit float points at a cell index and line range of the outgoing
+  -- document. Unsynced edits in it would have marked the facade modified, so
+  -- getting here means the user chose to reload over them.
+  require('ipynb.edit').discard(state)
+  require('ipynb.images').clear_all_images(state)
+
+  local old_by_id = {}
+  for _, cell in ipairs(state.cells) do
+    if cell.id then
+      old_by_id[cell.id] = cell
+    end
+  end
+
+  -- A file without cell IDs (nbformat < 4.5, until it is first saved from
+  -- here) gets fresh random IDs on every read, which would match nothing and
+  -- misroute output from cells still running. Give each such cell the ID of
+  -- the next unmatched old cell with the same source, in document order.
+  -- Generated IDs were never on disk, so replacing them is safe.
+  local unmatched = {}
+  for _, cell in ipairs(state.cells) do
+    if cell.id and not cell_ids[cell.id] then
+      unmatched[#unmatched + 1] = cell
+    end
+  end
+  local next_old = 1
+  for _, cell in ipairs(cells) do
+    if generated_ids[cell.id] then
+      for i = next_old, #unmatched do
+        if unmatched[i].source == cell.source then
+          cell_ids[cell.id] = nil
+          cell.id = unmatched[i].id
+          cell_ids[cell.id] = true
+          next_old = i + 1
+          break
+        end
+      end
+    end
+  end
+
+  for _, cell in ipairs(cells) do
+    local old = cell.id and old_by_id[cell.id]
+    if old then
+      cell.execution_state = old.execution_state
+      -- Outputs produced since the last save exist only in memory: keep them
+      -- while the code that produced them is unchanged. Otherwise disk wins.
+      if old.outputs_unsaved and old.source == cell.source then
+        cell.outputs = old.outputs
+        cell.execution_count = old.execution_count
+        cell.outputs_unsaved = true
+        cell._stream_state = old._stream_state
+      end
+    end
+  end
+
+  state.cells = cells
+  state.metadata = metadata
+  state.cell_ids = cell_ids
+
+  -- :edit! unloads the buffer first, which detaches its highlighter.
+  if not vim.treesitter.highlighter.active[state.facade_buf] then
+    vim.treesitter.start(state.facade_buf, 'ipynb')
+  end
+  -- Like opening, reloading starts a fresh undo history: undo only restores
+  -- text, so undoing past a reload would bring back the old cells without
+  -- their outputs and metadata.
+  local undolevels = vim.bo[state.facade_buf].undolevels
+  vim.bo[state.facade_buf].undolevels = -1
+  require('ipynb.facade').refresh(state)
+  vim.bo[state.facade_buf].undolevels = undolevels
+end
+
 ---Open a notebook file (or create new if doesn't exist)
 ---@param buf number Buffer to populate
 ---@param path string Path to .ipynb file
 function M.open_notebook(buf, path)
-  local cells, metadata, cell_ids
+  local cells, metadata, cell_ids, generated_ids
 
   -- Check if file exists
   if vim.fn.filereadable(path) == 1 then
     -- Read existing notebook
-    cells, metadata, cell_ids = M.read_ipynb(path)
+    cells, metadata, cell_ids, generated_ids = M.read_ipynb(path)
   else
     -- Create new empty notebook
     cells, metadata, cell_ids = M.create_empty_notebook()
+    generated_ids = vim.deepcopy(cell_ids)
     vim.notify('New notebook: ' .. vim.fn.fnamemodify(path, ':t'), vim.log.levels.INFO)
+  end
+
+  -- BufReadCmd re-fires on an open notebook when it is reloaded from disk
+  -- (:edit!, or autoread after an external change).
+  local existing = state_mod.notebooks[buf]
+  if existing then
+    reload_notebook(existing, cells, metadata, cell_ids, generated_ids)
+    return
   end
 
   -- Create state
@@ -369,6 +461,9 @@ function M.save_notebook(buf, path)
 
   -- Mark buffer as saved
   vim.bo[buf].modified = false
+  for _, cell in ipairs(state.cells) do
+    cell.outputs_unsaved = nil
+  end
 
   vim.notify('Saved notebook: ' .. path, vim.log.levels.INFO)
 end

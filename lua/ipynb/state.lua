@@ -28,6 +28,7 @@ local M = {}
 ---@field output_extmark number|nil Output virtual lines extmark
 ---@field edit_buf number|nil Persistent edit buffer for this cell
 ---@field _stream_state { output_index: number, cursor: number }|nil Transient stream cursor state
+---@field outputs_unsaved boolean|nil Outputs changed since the notebook was last saved
 
 ---@class EditState
 ---@field buf number Float buffer
