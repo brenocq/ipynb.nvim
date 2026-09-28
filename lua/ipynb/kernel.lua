@@ -407,6 +407,30 @@ function M.get_python_info(notebook_path)
   return discover_python(notebook_path, nil)
 end
 
+-- Stderr lines that are expected noise, not problems. ipykernel 7.3+ warns on
+-- every start that the kernel runs over TCP without encryption; local kernels
+-- only listen on localhost, and Jupyter signs every message with a key from a
+-- connection file only this user can read, as in Jupyter's own frontends.
+local IGNORED_STDERR = {
+  "Kernel is running over TCP without encryption",
+}
+
+---Show a line of bridge (or kernel) stderr unless it is known noise.
+---@param line string
+local function report_stderr(line)
+  if line == "" then
+    return
+  end
+  for _, text in ipairs(IGNORED_STDERR) do
+    if line:find(text, 1, true) then
+      return
+    end
+  end
+  vim.schedule(function()
+    vim.notify("Kernel bridge stderr: " .. line, vim.log.levels.WARN)
+  end)
+end
+
 ---Start the Python bridge process for a notebook
 ---@param state NotebookState
 ---@param python_path string|nil Explicit python path (highest priority)
@@ -437,6 +461,8 @@ function M.start_bridge(state, python_path)
   -- Unbuffered stdout arrives in chunks: data[1] continues the previous
   -- partial line, the last element starts the next one.
   local stdout_pending = ""
+  -- Stderr is reassembled the same way, so filtering sees whole lines.
+  local stderr_pending = ""
   local job_id = vim.fn.jobstart(cmd, {
     on_stdout = function(_, data, _)
       data[1] = stdout_pending .. (data[1] or "")
@@ -451,15 +477,16 @@ function M.start_bridge(state, python_path)
       end
     end,
     on_stderr = function(_, data, _)
+      data[1] = stderr_pending .. (data[1] or "")
+      stderr_pending = table.remove(data) or ""
       for _, line in ipairs(data) do
-        if line and line ~= "" then
-          vim.schedule(function()
-            vim.notify("Kernel bridge stderr: " .. line, vim.log.levels.WARN)
-          end)
-        end
+        report_stderr(line)
       end
     end,
     on_exit = function(_, code, _)
+      -- A final line without a trailing newline is still pending.
+      report_stderr(stderr_pending)
+      stderr_pending = ""
       if state.kernel then
         state.kernel.job_id = nil
         state.kernel.connected = false
